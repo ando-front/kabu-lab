@@ -637,3 +637,96 @@ header {
     grid-template-columns: 60px 1fr 70px;
   }
 }
+
+/* ============ L1強化: 予想 vs 実際カード ============ */
+.predictions-section { margin: 20px 0 12px; }
+.pred-intro {
+  font-size: 12px; color: var(--ink-dim); margin-bottom: 12px;
+  line-height: 1.7;
+}
+.pred-cards { display: grid; gap: 12px; }
+.pred-card {
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-left-width: 3px; border-radius: 4px; padding: 14px 16px;
+}
+.pred-card.pred-hit  { border-left-color: var(--green); background: rgba(123,216,143,0.06); }
+.pred-card.pred-dir  { border-left-color: var(--accent); background: rgba(249,199,79,0.05); }
+.pred-card.pred-miss { border-left-color: var(--red); background: rgba(255,107,107,0.05); }
+.pred-head {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 10px;
+}
+.pred-stock { font-size: 14px; font-weight: 700; color: var(--ink); }
+.pred-verdict { font-size: 13px; font-weight: 700; }
+.pred-card.pred-hit  .pred-verdict { color: var(--green); }
+.pred-card.pred-dir  .pred-verdict { color: var(--accent); }
+.pred-card.pred-miss .pred-verdict { color: var(--red); }
+.pred-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 8px; margin-bottom: 10px;
+}
+.pred-label { font-size: 10px; color: var(--ink-dim); letter-spacing: 1px; }
+.pred-value {
+  font-family: 'JetBrains Mono', monospace; font-size: 14px;
+  color: var(--ink); margin-top: 2px;
+}
+.pred-value.pred-pred { color: var(--accent); }
+.pred-reason {
+  font-size: 12px; color: var(--ink-dim);
+  padding: 8px 10px; background: var(--bg);
+  border-radius: 3px; line-height: 1.6;
+}
+.pred-ack-btn {
+  margin-top: 10px; padding: 6px 14px;
+  background: var(--border); color: var(--ink); border: none;
+  border-radius: 3px; cursor: pointer; font-size: 12px;
+  font-family: 'JetBrains Mono', monospace; transition: all 0.15s;
+}
+.pred-ack-btn:hover { background: var(--green); color: var(--bg); }
+
+@media (max-width: 600px) {
+  .pred-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ============ 判断タグ選択(モーダル内) ============ */
+.tag-options {
+  display: flex; flex-wrap: wrap; gap: 6px;
+}
+.tag-btn {
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--ink-dim); padding: 6px 12px;
+  border-radius: 3px; cursor: pointer; font-size: 12px;
+  font-family: 'Zen Kaku Gothic New', sans-serif;
+  transition: all 0.15s;
+}
+.tag-btn:hover { border-color: var(--accent); color: var(--ink); }
+.tag-btn.selected {
+  background: var(--accent); border-color: var(--accent); color: var(--bg);
+  font-weight: 700;
+}
+
+/* 予想入力 */
+.predict-hint {
+  margin-top: 4px; font-size: 11px; color: var(--ink-dim);
+}
+
+/* 判断タグ別統計テーブル */
+.tag-stats-table {
+  width: 100%; border-collapse: collapse;
+  font-size: 12px; margin-top: 6px;
+}
+.tag-stats-table th, .tag-stats-table td {
+  padding: 6px 8px;
+  border-bottom: 1px dashed var(--border);
+  text-align: left;
+}
+.tag-stats-table th {
+  font-size: 10px; color: var(--ink-dim);
+  letter-spacing: 1px; font-weight: normal;
+}
+.tag-stats-table td {
+  font-family: 'JetBrains Mono', monospace;
+}
+.tag-stats-table td.positive { color: var(--green); }
+.tag-stats-table td.negative { color: var(--red); }
+.tag-stats-table td.zero { color: var(--ink-dim); }

@@ -819,11 +819,73 @@ function render() {
   renderStocks();
   renderJournal();
   renderDiversityScore();
+  renderPredictions();
   if (currentModalStock && document.getElementById('modal').classList.contains('show')) {
     updateModalPrice();
     updateSummary();
   }
 }
+
+// ============ 予想 vs 実際カード(L1強化) ============
+// 買いトレードの予想株価が予定時刻(7日後)を過ぎたら、振り返りカードを表示。
+// 「acknowledged: true」になったエントリは表示しない(表示済みフラグ)
+function renderPredictions() {
+  const el = document.getElementById('predictionsSection');
+  if (!el) return;
+  const acc = getActiveAccount();
+  const due = (acc.journal || []).filter(e =>
+    e.action === 'buy' &&
+    e.predictPrice != null &&
+    e.predictDueMinute != null &&
+    state.simMinute >= e.predictDueMinute &&
+    !e.predictAcknowledged
+  );
+  if (due.length === 0) { el.innerHTML = ''; return; }
+
+  const cards = due.map((e, idx) => {
+    const cur = state.prices[e.ticker];
+    const predicted = e.predictPrice;
+    const predDir = predicted > e.price ? 'up' : predicted < e.price ? 'down' : 'flat';
+    const actDir  = cur > e.price ? 'up' : cur < e.price ? 'down' : 'flat';
+    const dirHit  = predDir === actDir && predDir !== 'flat';
+    const errPct  = Math.abs(predicted - cur) / cur * 100;
+    const closeHit = errPct <= 3; // 誤差3%以内で「ほぼ的中」
+    let verdict, vCls;
+    if (closeHit) { verdict = '🎯 ほぼ的中!'; vCls = 'pred-hit'; }
+    else if (dirHit) { verdict = '🔼 方向は当たり'; vCls = 'pred-dir'; }
+    else { verdict = '❌ 外れた'; vCls = 'pred-miss'; }
+    return `<div class="pred-card ${vCls}">
+      <div class="pred-head">
+        <span class="pred-stock">${e.stockName}</span>
+        <span class="pred-verdict">${verdict}</span>
+      </div>
+      <div class="pred-grid">
+        <div><div class="pred-label">買った時</div><div class="pred-value">${formatYen(e.price)}</div></div>
+        <div><div class="pred-label">予想</div><div class="pred-value pred-pred">${formatYen(predicted)}</div></div>
+        <div><div class="pred-label">実際 (今)</div><div class="pred-value">${formatYen(cur)}</div></div>
+        <div><div class="pred-label">予想との誤差</div><div class="pred-value">${errPct.toFixed(1)}%</div></div>
+      </div>
+      <div class="pred-reason">買った理由: 「${escapeHtml(e.note) || '(記録なし)'}」</div>
+      <button class="pred-ack-btn" onclick="ackPrediction(${acc.journal.indexOf(e)})">✓ 確認した</button>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="section-title">📌 予想の答え合わせ</div>
+    <div class="pred-intro">7日前の予想と実際の株価を比べてみよう。当たり外れより<strong>「なぜそう予想したか」</strong>が大事だよ。</div>
+    <div class="pred-cards">${cards}</div>
+  `;
+}
+
+window.ackPrediction = function(idx) {
+  const acc = getActiveAccount();
+  if (acc.journal[idx]) {
+    acc.journal[idx].predictAcknowledged = true;
+    saveState();
+    renderPredictions();
+    checkMissionUnlocks();
+  }
+};
 
 // ============ ニュースイベント適用 ============
 function applyNewsEvent(evt) {
@@ -964,6 +1026,7 @@ function showWeeklyReview(day) {
     ${journalHtml}
     <div class="review-section-title" style="margin-top:18px">📰 今週起きたニュース</div>
     ${newsHtml}
+    ${buildDecisionTagStats(acc)}
     <div class="review-question">
       <strong>🤔 考えてみよう</strong><br>
       ${weekJournal.length > 0
@@ -972,6 +1035,52 @@ function showWeeklyReview(day) {
     </div>
   `;
   document.getElementById('reviewModal').classList.add('show');
+}
+
+// 判断タグ別の勝率集計(累計)
+const TAG_LABELS = {
+  intuition: { icon: '💭', name: '直感' },
+  news:      { icon: '📰', name: 'ニュース' },
+  chart:     { icon: '📈', name: 'チャート' },
+  diversify: { icon: '⚖', name: '分散' },
+};
+function buildDecisionTagStats(acc) {
+  const buys = (acc.journal || []).filter(e => e.action === 'buy' && e.decisionTag);
+  if (buys.length === 0) {
+    return `<div class="review-section-title" style="margin-top:18px">🏷 判断タグ別の傾向</div>
+      <div style="font-size:12px;color:var(--ink-dim)">まだ判断タグつきの買いがないよ。買うときに「直感/ニュース/チャート/分散」を選ぶと、ここに集計が出るよ。</div>`;
+  }
+  const tagAggregate = {};
+  for (const tag of Object.keys(TAG_LABELS)) tagAggregate[tag] = { count: 0, win: 0, totalPct: 0 };
+  for (const e of buys) {
+    const cur = state.prices[e.ticker];
+    if (!cur) continue;
+    const pct = ((cur - e.price) / e.price) * 100;
+    const a = tagAggregate[e.decisionTag];
+    if (!a) continue;
+    a.count++;
+    if (pct > 0) a.win++;
+    a.totalPct += pct;
+  }
+  const rows = Object.entries(tagAggregate).filter(([, v]) => v.count > 0).map(([tag, v]) => {
+    const lbl = TAG_LABELS[tag];
+    const winRate = (v.win / v.count) * 100;
+    const avgPct = v.totalPct / v.count;
+    const cls = avgPct > 0 ? 'positive' : avgPct < 0 ? 'negative' : 'zero';
+    const sign = avgPct >= 0 ? '+' : '';
+    return `<tr>
+      <td>${lbl.icon} ${lbl.name}</td>
+      <td>${v.count}回</td>
+      <td>${winRate.toFixed(0)}%</td>
+      <td class="${cls}">${sign}${avgPct.toFixed(2)}%</td>
+    </tr>`;
+  }).join('');
+  return `<div class="review-section-title" style="margin-top:18px">🏷 判断タグ別の傾向 (買い・累計)</div>
+    <table class="tag-stats-table">
+      <thead><tr><th>タグ</th><th>回数</th><th>勝率</th><th>平均含み損益</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="font-size:11px;color:var(--ink-dim);margin-top:6px">※含み損益=現在値ベース。すでに売った銘柄は集計対象外</div>`;
 }
 
 window.closeReview = function() {
@@ -1250,9 +1359,28 @@ function openModal(ticker) {
   switchTab('buy');
   document.getElementById('qty').value = 1;
   document.getElementById('note').value = '';
+  document.getElementById('predictPrice').value = '';
+  document.querySelectorAll('#tagOptions .tag-btn').forEach(b => b.classList.remove('selected'));
+  selectedTag = null;
   updateSummary();
   document.getElementById('modal').classList.add('show');
 }
+
+// 選択中の判断タグ(intuition/news/chart/diversify)
+let selectedTag = null;
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('#tagOptions .tag-btn');
+  if (!btn) return;
+  const tag = btn.dataset.tag;
+  if (selectedTag === tag) {
+    selectedTag = null;
+    btn.classList.remove('selected');
+  } else {
+    selectedTag = tag;
+    document.querySelectorAll('#tagOptions .tag-btn').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected');
+  }
+});
 
 function updateModalPrice() {
   if (!currentModalStock) return;
@@ -1288,16 +1416,19 @@ window.switchTab = function(tab) {
   const btn = document.getElementById('actionBtn');
   const noteField = document.getElementById('noteField');
   const noteLabel = noteField.querySelector('label');
+  const predictField = document.getElementById('predictField');
   if (tab === 'buy') {
     btn.textContent = '買う';
     btn.className = 'action-btn buy-btn';
     noteLabel.textContent = 'なぜ買う? — これが一番大事';
     document.getElementById('note').placeholder = '例: ゲームが好きだから。新作が出そう。';
+    if (predictField) predictField.style.display = '';
   } else {
     btn.textContent = '売る';
     btn.className = 'action-btn sell-btn';
     noteLabel.textContent = 'なぜ売る?';
     document.getElementById('note').placeholder = '例: 上がったので利益確定。もっと下がりそう。';
+    if (predictField) predictField.style.display = 'none';
   }
   renderQuickButtons();
   updateSummary();
@@ -1375,6 +1506,9 @@ window.executeTrade = function() {
   const acc = getActiveAccount();
   const qty = parseInt(document.getElementById('qty').value) || 0;
   const note = document.getElementById('note').value.trim();
+  const predictRaw = parseFloat(document.getElementById('predictPrice').value);
+  const predictPrice = isFinite(predictRaw) && predictRaw > 0 ? predictRaw : null;
+  const decisionTag = selectedTag; // intuition | news | chart | diversify | null
   const stock = currentModalStock;
   const price = state.prices[stock.ticker];
   const total = qty * price;
@@ -1398,6 +1532,9 @@ window.executeTrade = function() {
       simMinute: state.simMinute, action: 'buy', ticker: stock.ticker, stockName: stock.name,
       qty, price, total, commission, note,
       macroSnapshot: state.macro ? { ...state.macro } : null,
+      predictPrice,                                       // 1週間後の予想株価
+      predictDueMinute: state.simMinute + 7 * 24 * 60,    // 7日後の判定時刻
+      decisionTag,                                        // 判断分類
     });
     showToast(`${stock.name}を${qty}株 買った (手数料 ${formatYen(commission)})`);
   } else {
@@ -1421,6 +1558,7 @@ window.executeTrade = function() {
       simMinute: state.simMinute, action: 'sell', ticker: stock.ticker, stockName: stock.name,
       qty, price, total, commission, tax, profit, note,
       macroSnapshot: state.macro ? { ...state.macro } : null,
+      decisionTag,
     });
     showToast(`${stock.name}を${qty}株 売った (手取り ${formatYen(netReceive)}${taxMsg})`);
   }
@@ -1609,6 +1747,28 @@ const TUTORIAL_STEPS = [
 <p style="margin-top:10px;color:var(--ink-dim);font-size:12px">⚠️ メイン口座とは別の世界線です。元に戻すこともできます(データは保持)。</p>`,
   },
   {
+    title: '🎯 予想 → 検証 のサイクル',
+    body: `<p>このアプリで一番<strong>身につけてほしい力</strong>は「<strong>予想 → 行動 → 答え合わせ</strong>」のサイクルです。</p>
+<ol class="tut-list">
+  <li>買うときに「<strong>1週間後の予想株価</strong>」を入力する(任意)</li>
+  <li>シム内で7日経つと、保有銘柄の下に「📌 予想の答え合わせ」カードが出る</li>
+  <li>予想・実際・誤差・買った理由を一緒に見て、自分の考え方のクセを確認</li>
+</ol>
+<p style="margin-top:10px"><strong>当たり外れより「なぜそう予想したか」が大事。</strong>外れた回数が多いほど、自分の判断のクセが見えてきて、次に活かせます。</p>`,
+  },
+  {
+    title: '🏷 判断タグで自分の傾向を知る',
+    body: `<p>買うときに、その判断のもとになったものを選んでみよう(任意):</p>
+<table class="tut-table">
+  <tr><td>💭 直感</td><td>なんとなく、好きだから</td></tr>
+  <tr><td>📰 ニュース</td><td>ニュースイベントを見て決めた</td></tr>
+  <tr><td>📈 チャート</td><td>ローソク足やRSI等の指標で判断</td></tr>
+  <tr><td>⚖ 分散</td><td>ポートフォリオのバランス調整目的</td></tr>
+</table>
+<p style="margin-top:10px">週次振り返りに「<strong>🏷 判断タグ別の傾向</strong>」が表示されます。「直感の勝率は低くて、チャート判断は高い」みたいな自分の傾向が分かります。</p>
+<p style="margin-top:8px;color:var(--ink-dim);font-size:12px">プロの投資家も同じことをしています(=投資日誌)。これが続けられるとレベルが一段上がります。</p>`,
+  },
+  {
     title: '🏆 ミッションに挑戦しよう',
     body: `<p>右上の<strong>「🏆 ミッション」</strong>ボタンで達成目標の一覧が見られます。</p>
 <p>チュートリアルで学んだことを実際に試して、ミッションを達成しよう！</p>
@@ -1617,7 +1777,7 @@ const TUTORIAL_STEPS = [
   <li>📌 「なぜ買う？」を入力してから購入してみよう</li>
   <li>📌 3銘柄以上に分散してみよう</li>
   <li>📌 銘柄の「ℹ 情報」タブで会社解説を読もう</li>
-  <li>📌 マクロ環境が大きく振れるタイミングで取引しよう</li>
+  <li>📌 1週間後の予想株価を入力して、答え合わせカードを確認しよう</li>
 </ul>
 <p style="margin-top:12px; color:var(--ink-dim); font-size:12px">保護者の方: 「📋 保護者レポート」ボタンで子どものトレード記録・理由・達成ミッションを一覧できます。</p>`,
   },
@@ -1736,6 +1896,11 @@ window.openParentReport = function() {
     </div>
 
     <div class="report-section">
+      <div class="report-label">🏷 判断タグ別の傾向</div>
+      ${buildDecisionTagStats(acc)}
+    </div>
+
+    <div class="report-section">
       <div class="report-label">🏆 達成済みミッション (${doneMissions.length}/${MISSIONS.length})</div>
       <div style="font-size:13px;line-height:2">${missionText}</div>
     </div>
@@ -1783,6 +1948,10 @@ const MISSIONS = [
   { id: 'm11', title: '銘柄解説を読んだ',   desc: '銘柄の「ℹ 情報」タブを開いてみよう',  check: (s) => s.openedInfoTab === true },
   { id: 'm12', title: 'マクロを意識',       desc: 'マクロ環境(金利/為替/景気)が大きく振れる場面で取引しよう', check: (s) => eachAccount(s, a => a.journal.some(e => e.macroSnapshot && (Math.abs(e.macroSnapshot.rate) > 0.4 || Math.abs(e.macroSnapshot.fx) > 0.4 || Math.abs(e.macroSnapshot.cycle) > 0.4))) },
   { id: 'm13', title: '2口座で並走',       desc: '複数ポートフォリオモードで両方の口座で売買しよう', check: (s) => s.multiMode && s.accounts && (s.accounts.aggressive.journal.length > 0) && (s.accounts.defensive.journal.length > 0) },
+  // L1強化: 自己観察フック
+  { id: 'm14', title: '予想を立ててみた',   desc: '買うときに「1週間後の予想株価」を入力しよう', check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'buy' && e.predictPrice != null)) },
+  { id: 'm15', title: '答え合わせ',         desc: '予想と実際の答え合わせカードを確認しよう', check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'buy' && e.predictAcknowledged)) },
+  { id: 'm16', title: '判断タグを使った',   desc: '買うときに「直感/ニュース/チャート/分散」のタグを選ぼう', check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'buy' && e.decisionTag)) },
 ];
 
 function getMissionStatus() {

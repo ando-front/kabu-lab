@@ -60,6 +60,8 @@
   <div class="section-title">保有銘柄</div>
   <div class="holdings"><div id="holdingsContent"></div></div>
 
+  <div id="predictionsSection" class="predictions-section"></div>
+
   <div class="section-title">銘柄一覧 — タップして詳細</div>
   <div id="stocksGrid" class="stocks"></div>
 
@@ -94,6 +96,20 @@
       <div class="field" id="noteField">
         <label>なぜ買う(売る)? — これが一番大事</label>
         <textarea id="note" placeholder="例: ゲーム会社で好きだから。新作が出そう。"></textarea>
+      </div>
+      <div class="field" id="tagField">
+        <label>判断のもとになったのは? <small>(任意)</small></label>
+        <div class="tag-options" id="tagOptions">
+          <button type="button" class="tag-btn" data-tag="intuition">💭 直感</button>
+          <button type="button" class="tag-btn" data-tag="news">📰 ニュース</button>
+          <button type="button" class="tag-btn" data-tag="chart">📈 チャート</button>
+          <button type="button" class="tag-btn" data-tag="diversify">⚖ 分散</button>
+        </div>
+      </div>
+      <div class="field" id="predictField">
+        <label>1週間後の予想株価 <small>(任意 — 買いのときだけ)</small></label>
+        <input type="number" id="predictPrice" placeholder="例: 3500" min="1" step="1">
+        <div class="predict-hint">あとで実際の値と比べると、自分の予想が当たりやすいクセが見えるよ</div>
       </div>
       <div class="trade-summary" id="summary"></div>
       <button class="action-btn buy-btn" id="actionBtn" onclick="executeTrade()">買う</button>
