@@ -1,25 +1,47 @@
 import { STOCKS } from './stocks.js';
-import { tickPrice, isMarketOpen, formatSimTime, advanceTime, checkNewsEvent, NEWS_EVENTS } from './simulator.js';
+import { tickPrice, isMarketOpen, formatSimTime, advanceTime, checkNewsEvent, NEWS_EVENTS, defaultMacro, evolveMacro, describeMacro } from './simulator.js';
 
 // ============ 状態 ============
 const STORAGE_KEY = 'kabu_state_v2';
 
+// 複数ポートフォリオ(口座)定義
+// main: 単一口座(従来)、aggressive/defensive: Phase 2 複数口座機能
+function defaultAccount(initial = 1000000) {
+  return {
+    cash: initial,
+    initialCapital: initial,
+    holdings: {},
+    journal: [],
+    portfolioHistory: [],
+    totalCommission: 0,
+    totalTax: 0,
+  };
+}
+
 function defaultState() {
   return {
+    // 単一口座(後方互換)
     cash: 1000000,
     initialCapital: 1000000,
     holdings: {},
     journal: [],
+    portfolioHistory: [],
+    totalCommission: 0,
+    totalTax: 0,
+    // 共通
     onboardingSeen: false,
     prices: {},
     prevClose: {},
     simMinute: 9 * 60, // Day 1 · 09:00 から開始
     newsLog: [],       // 発生したニュース履歴
     firedNewsIds: [],  // 再発防止用
-    portfolioHistory: [], // 資産推移 [{t, value}]
     lastReviewDay: 0,  // 最後に振り返りを表示した日
-    totalCommission: 0, // 支払い手数料累計
-    totalTax: 0,        // 支払い税金累計
+    // Phase 2: 複数口座
+    multiMode: false,                  // true で複数口座モード
+    activeAccount: 'main',             // 'main' | 'aggressive' | 'defensive'
+    accounts: null,                    // { aggressive: {...}, defensive: {...} } (有効化時に生成)
+    // Phase 3: マクロ経済
+    macro: defaultMacro(),
   };
 }
 
@@ -37,7 +59,17 @@ function skipToNextMarketOpen() {
 function loadState() {
   try {
     const s = localStorage.getItem(STORAGE_KEY);
-    if (s) return { ...defaultState(), ...JSON.parse(s) };
+    if (s) {
+      const merged = { ...defaultState(), ...JSON.parse(s) };
+      // マイグレーション: macroが未定義なら初期化
+      if (!merged.macro) merged.macro = defaultMacro();
+      // マルチ口座が中途半端ならフォールバック
+      if (merged.multiMode && (!merged.accounts || !merged.accounts.aggressive || !merged.accounts.defensive)) {
+        merged.multiMode = false;
+        merged.activeAccount = 'main';
+      }
+      return merged;
+    }
   } catch (e) {}
   return defaultState();
 }
@@ -60,6 +92,52 @@ let simTickTimer = null;
 let lastPrices = {};
 let lastTotalValue = null;
 let activeNewsEvent = null; // 表示中のニュース
+
+// ============ 口座アクセスヘルパー ============
+// 単一モードでは state を直接読み書きし、複数口座モードでは accounts[id] を参照する。
+// 既存コードは「acc.cash」「acc.holdings」のように acc を経由するよう書き換え済み。
+function getActiveAccount() {
+  if (state.multiMode && state.accounts && state.accounts[state.activeAccount]) {
+    return state.accounts[state.activeAccount];
+  }
+  return state; // 後方互換: state自身がmain口座
+}
+
+function listAccounts() {
+  if (!state.multiMode) {
+    return [{ id: 'main', name: 'メイン口座', acc: state }];
+  }
+  return [
+    { id: 'aggressive', name: '積極運用', acc: state.accounts.aggressive },
+    { id: 'defensive', name: '守り重視', acc: state.accounts.defensive },
+  ];
+}
+
+window.switchAccount = function(id) {
+  if (!state.multiMode) return;
+  state.activeAccount = id;
+  saveState();
+  render();
+};
+
+window.toggleMultiMode = function() {
+  if (!state.multiMode) {
+    // 単一→複数: 既存口座を「メイン」のまま残し、新しく2口座(各50万円)を作成
+    if (!confirm('複数ポートフォリオを開始しますか?\n\n「積極運用(50万円)」と「守り重視(50万円)」の2口座が作成されます。\nメイン口座とは別に並走できます(切り替え可能)。')) return;
+    state.accounts = {
+      aggressive: defaultAccount(500000),
+      defensive: defaultAccount(500000),
+    };
+    state.multiMode = true;
+    state.activeAccount = 'aggressive';
+  } else {
+    if (!confirm('複数ポートフォリオモードを終了しますか?\n\n2口座のデータは保存されたまま、メイン口座に戻ります。')) return;
+    state.multiMode = false;
+    state.activeAccount = 'main';
+  }
+  saveState();
+  render();
+};
 
 // ============ ローソク足バー構築ヘルパー ============
 // 5分足キャンドルを生成
@@ -97,10 +175,14 @@ function initPrices() {
 
 // ============ シミュレーションループ ============
 function simTick() {
+  if (!state.macro) state.macro = defaultMacro();
+  // マクロ環境を毎tick少しだけ動かす(市場時間外も)
+  state.macro = evolveMacro(state.macro);
+
   if (isMarketOpen(state.simMinute)) {
     STOCKS.forEach(stock => {
       lastPrices[stock.ticker] = state.prices[stock.ticker];
-      state.prices[stock.ticker] = tickPrice(state.prices[stock.ticker], stock);
+      state.prices[stock.ticker] = tickPrice(state.prices[stock.ticker], stock, state.macro);
       if (!priceHistory[stock.ticker]) priceHistory[stock.ticker] = [];
       priceHistory[stock.ticker].push({ t: state.simMinute, price: state.prices[stock.ticker] });
       if (priceHistory[stock.ticker].length > 150) priceHistory[stock.ticker].shift();
@@ -125,12 +207,14 @@ function simTick() {
   }
   state.simMinute = nextMinute;
 
-  // 資産推移を記録（10分ごと）
+  // 資産推移を記録（10分ごと） - 全口座について
   if (state.simMinute % 10 === 0) {
-    if (!state.portfolioHistory) state.portfolioHistory = [];
-    const totalVal = state.cash + getTotalStockValue();
-    state.portfolioHistory.push({ t: state.simMinute, value: totalVal });
-    if (state.portfolioHistory.length > 500) state.portfolioHistory.shift();
+    listAccounts().forEach(({ acc }) => {
+      if (!acc.portfolioHistory) acc.portfolioHistory = [];
+      const totalVal = acc.cash + getStockValueOf(acc);
+      acc.portfolioHistory.push({ t: state.simMinute, value: totalVal });
+      if (acc.portfolioHistory.length > 500) acc.portfolioHistory.shift();
+    });
   }
 
   // 週次振り返りチェック（7日ごと）
@@ -378,7 +462,8 @@ function svgWrap(inner, h = H) {
   return `<svg class="detail-chart" viewBox="0 0 ${W} ${h}" preserveAspectRatio="none">${inner}</svg>`;
 }
 function tradeMarkers(ticker, toX, toY, history) {
-  const trades = state.journal.filter(e => e.ticker === ticker);
+  const acc = getActiveAccount();
+  const trades = acc.journal.filter(e => e.ticker === ticker);
   return trades.map(e => {
     let closest = 0, bestDiff = Infinity;
     history.forEach((h, i) => { const d = Math.abs(h.t - e.simMinute); if (d < bestDiff) { bestDiff = d; closest = i; } });
@@ -564,10 +649,11 @@ function buildVolumeChart(candles, history) {
 
 // ② 保有銘柄別損益バーチャート（水平）
 function buildPnlBarChart() {
-  const tickers = Object.keys(state.holdings);
+  const acc = getActiveAccount();
+  const tickers = Object.keys(acc.holdings);
   if (tickers.length === 0) return '';
   const items = tickers.map(t => {
-    const h = state.holdings[t];
+    const h = acc.holdings[t];
     const cur = state.prices[t];
     const pnl = (cur - h.avgCost) * h.qty;
     const pct = ((cur - h.avgCost) / h.avgCost) * 100;
@@ -594,15 +680,16 @@ function buildPnlBarChart() {
 
 // ③ 資産構成リングチャート（現金 + 各銘柄）
 function buildAllocationRing() {
-  const tickers = Object.keys(state.holdings);
-  const totalStock = getTotalStockValue();
-  const total = state.cash + totalStock;
+  const acc = getActiveAccount();
+  const tickers = Object.keys(acc.holdings);
+  const totalStock = getStockValueOf(acc);
+  const total = acc.cash + totalStock;
   if (total <= 0) return '';
   // セグメント定義
   const COLORS = ['#7bd88f','#f9c74f','#ff6b6b','#4ecdc4','#a29bfe','#fd79a8','#fdcb6e','#6c5ce7','#00b894','#e17055','#74b9ff','#55efc4'];
-  const segments = [{ label: '現金', value: state.cash, color: '#5a7a65' }];
+  const segments = [{ label: '現金', value: acc.cash, color: '#5a7a65' }];
   tickers.forEach((t, i) => {
-    const val = state.prices[t] * state.holdings[t].qty;
+    const val = state.prices[t] * acc.holdings[t].qty;
     const name = STOCKS.find(s => s.ticker === t)?.name || t;
     segments.push({ label: name, value: val, color: COLORS[i % COLORS.length] });
   });
@@ -636,19 +723,24 @@ function buildAllocationRing() {
 }
 
 function buildPortfolioGraph() {
-  const hist = state.portfolioHistory || [];
+  const acc = getActiveAccount();
+  // 複数モードでは両口座を重ね描き
+  if (state.multiMode && state.accounts) {
+    return buildMultiPortfolioGraph();
+  }
+  const hist = acc.portfolioHistory || [];
   if (hist.length < 2) return '<div class="pg-empty">まだデータが少ない。しばらく運用すると資産推移グラフが表示されます。</div>';
   const values = hist.map(h => h.value);
-  const min = Math.min(...values, state.initialCapital) * 0.998;
-  const max = Math.max(...values, state.initialCapital) * 1.002;
+  const min = Math.min(...values, acc.initialCapital) * 0.998;
+  const max = Math.max(...values, acc.initialCapital) * 1.002;
   const range = max - min || 1;
   const W = 600, H = 120;
   const toX = (i) => (i / (hist.length - 1)) * W;
   const toY = (v) => H - ((v - min) / range) * H;
   const points = hist.map((h, i) => `${toX(i).toFixed(1)},${toY(h.value).toFixed(1)}`).join(' ');
-  const baseY = toY(state.initialCapital).toFixed(1);
+  const baseY = toY(acc.initialCapital).toFixed(1);
   const lastVal = values[values.length - 1];
-  const isUp = lastVal >= state.initialCapital;
+  const isUp = lastVal >= acc.initialCapital;
   const color = isUp ? 'var(--green)' : 'var(--red)';
   const fillId = 'pgFill';
   return `<svg class="portfolio-graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
@@ -665,14 +757,59 @@ function buildPortfolioGraph() {
   </svg>`;
 }
 
+// 複数口座: 両ポートフォリオを%基準で重ね描き(出発点=100%)
+function buildMultiPortfolioGraph() {
+  const accs = listAccounts();
+  const W = 600, H = 130;
+  // %基準に変換
+  const series = accs.map(({ id, name, acc }) => {
+    const hist = acc.portfolioHistory || [];
+    if (hist.length < 2) return null;
+    const init = acc.initialCapital;
+    const pts = hist.map(h => ({ t: h.t, pct: (h.value / init) * 100 }));
+    return { id, name, pts };
+  }).filter(Boolean);
+  if (series.length === 0) return '<div class="pg-empty">まだデータが少ない。両口座でしばらく運用すると比較グラフが表示されます。</div>';
+  // y軸範囲
+  const allPcts = series.flatMap(s => s.pts.map(p => p.pct));
+  const min = Math.min(...allPcts, 100) - 1;
+  const max = Math.max(...allPcts, 100) + 1;
+  const range = max - min || 1;
+  // x軸: 全口座のtを揃える(最大長)
+  const maxLen = Math.max(...series.map(s => s.pts.length));
+  const toX = (i, len) => (i / (len - 1)) * W;
+  const toY = (v) => H - ((v - min) / range) * H;
+  const baseY = toY(100).toFixed(1);
+  const colorMap = { aggressive: '#ff6b6b', defensive: '#4ecdc4', main: 'var(--green)' };
+  const lines = series.map(s => {
+    const len = s.pts.length;
+    const pts = s.pts.map((p, i) => `${toX(i, len).toFixed(1)},${toY(p.pct).toFixed(1)}`).join(' ');
+    const c = colorMap[s.id] || 'var(--ink)';
+    return `<polyline points="${pts}" fill="none" stroke="${c}" stroke-width="2" vector-effect="non-scaling-stroke"/>`;
+  }).join('');
+  const legend = series.map(s => {
+    const c = colorMap[s.id] || 'var(--ink)';
+    const last = s.pts[s.pts.length - 1].pct;
+    return `<text fill="${c}" font-size="10" font-family="JetBrains Mono,monospace">${s.name}: ${last.toFixed(1)}%</text>`;
+  });
+  return `<svg class="portfolio-graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <line x1="0" y1="${baseY}" x2="${W}" y2="${baseY}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,3"/>
+    ${lines}
+    <g transform="translate(8,14)">${legend.map((t, i) => `<g transform="translate(0,${i*12})">${t}</g>`).join('')}</g>
+  </svg>`;
+}
+
 // ============ レンダリング ============
-function getTotalStockValue() {
+function getStockValueOf(acc) {
   let total = 0;
-  for (const [ticker, holding] of Object.entries(state.holdings)) {
+  for (const [ticker, holding] of Object.entries(acc.holdings || {})) {
     const price = state.prices[ticker];
     if (price) total += price * holding.qty;
   }
   return total;
+}
+function getTotalStockValue() {
+  return getStockValueOf(getActiveAccount());
 }
 
 function render() {
@@ -691,24 +828,37 @@ function render() {
 // ============ ニュースイベント適用 ============
 function applyNewsEvent(evt) {
   const affected = [];
-  STOCKS.forEach(stock => {
-    const matchTicker = evt.ticker && evt.ticker === stock.ticker;
-    const matchTag = evt.tag && evt.tag === stock.tag;
-    const isGlobal = !evt.ticker && !evt.tag;
-    if (matchTicker || matchTag || isGlobal) {
-      const before = state.prices[stock.ticker];
-      let newPrice = before * (1 + evt.effect);
-      // 1tickの±5%制限を適用
-      newPrice = Math.max(before * 0.95, Math.min(before * 1.05, newPrice));
-      newPrice = newPrice < 100 ? Math.round(newPrice * 10) / 10 : Math.round(newPrice);
-      state.prices[stock.ticker] = newPrice;
-      if (priceHistory[stock.ticker]) {
-        priceHistory[stock.ticker].push({ t: state.simMinute, price: newPrice });
-        if (priceHistory[stock.ticker].length > 150) priceHistory[stock.ticker].shift();
+  // マクロ要素を持つイベントは指標自体を動かす(株価への直接効果は弱め)
+  if (evt.macro) {
+    if (!state.macro) state.macro = defaultMacro();
+    for (const k of ['rate', 'fx', 'cycle']) {
+      if (evt.macro[k] != null) {
+        state.macro[k] = Math.max(-1, Math.min(1, state.macro[k] + evt.macro[k]));
       }
-      affected.push(stock.name);
     }
-  });
+  }
+  if (evt.effect && evt.effect !== 0) {
+    STOCKS.forEach(stock => {
+      const matchTicker = evt.ticker && evt.ticker === stock.ticker;
+      const matchTag = evt.tag && evt.tag === stock.tag;
+      const isGlobal = !evt.ticker && !evt.tag;
+      if (matchTicker || matchTag || isGlobal) {
+        const before = state.prices[stock.ticker];
+        let newPrice = before * (1 + evt.effect);
+        // 1tickの±5%制限を適用
+        newPrice = Math.max(before * 0.95, Math.min(before * 1.05, newPrice));
+        newPrice = newPrice < 100 ? Math.round(newPrice * 10) / 10 : Math.round(newPrice);
+        state.prices[stock.ticker] = newPrice;
+        if (priceHistory[stock.ticker]) {
+          priceHistory[stock.ticker].push({ t: state.simMinute, price: newPrice });
+          if (priceHistory[stock.ticker].length > 150) priceHistory[stock.ticker].shift();
+        }
+        affected.push(stock.name);
+      }
+    });
+  } else if (evt.macro) {
+    affected.push('マクロ環境変化');
+  }
   state.firedNewsIds.push(evt.id);
   const entry = { ...evt, simMinute: state.simMinute, affected };
   state.newsLog.push(entry);
@@ -735,15 +885,16 @@ function showNewsToast(evt) {
 function renderDiversityScore() {
   const el = document.getElementById('diversityScore');
   if (!el) return;
-  const tickers = Object.keys(state.holdings);
+  const acc = getActiveAccount();
+  const tickers = Object.keys(acc.holdings);
   if (tickers.length === 0) {
     el.innerHTML = '<span class="div-label">分散スコア</span><span class="div-score div-na">—</span><span class="div-msg">株を買うと分散度がわかる</span>';
     return;
   }
   // 保有評価額の比率で計算（HHI逆数ベース）
-  const totalVal = getTotalStockValue();
+  const totalVal = getStockValueOf(acc);
   const weights = tickers.map(t => {
-    const val = state.prices[t] * state.holdings[t].qty;
+    const val = state.prices[t] * acc.holdings[t].qty;
     return val / totalVal;
   });
   const hhi = weights.reduce((sum, w) => sum + w * w, 0);
@@ -765,14 +916,15 @@ function showWeeklyReview(day) {
   const weekStart = (weekNum - 1) * 7 * 24 * 60;
   const weekEnd = weekNum * 7 * 24 * 60;
 
+  const acc = getActiveAccount();
   // 今週のジャーナルエントリ
-  const weekJournal = state.journal.filter(e => e.simMinute >= weekStart && e.simMinute < weekEnd);
+  const weekJournal = acc.journal.filter(e => e.simMinute >= weekStart && e.simMinute < weekEnd);
   // 今週のニュース
   const weekNews = (state.newsLog || []).filter(e => e.simMinute >= weekStart && e.simMinute < weekEnd);
   // 今週の資産推移（始値・終値）
-  const hist = (state.portfolioHistory || []).filter(e => e.t >= weekStart && e.t < weekEnd);
-  const weekStartVal = hist.length > 0 ? hist[0].value : state.initialCapital;
-  const weekEndVal = hist.length > 0 ? hist[hist.length - 1].value : state.cash + getTotalStockValue();
+  const hist = (acc.portfolioHistory || []).filter(e => e.t >= weekStart && e.t < weekEnd);
+  const weekStartVal = hist.length > 0 ? hist[0].value : acc.initialCapital;
+  const weekEndVal = hist.length > 0 ? hist[hist.length - 1].value : acc.cash + getStockValueOf(acc);
   const weekDelta = weekEndVal - weekStartVal;
   const weekPct = (weekDelta / weekStartVal) * 100;
   const sign = weekDelta >= 0 ? '+' : '';
@@ -827,15 +979,16 @@ window.closeReview = function() {
 };
 
 function renderPortfolio() {
-  const stockVal = getTotalStockValue();
-  const total = state.cash + stockVal;
-  const delta = total - state.initialCapital;
-  const pct = (delta / state.initialCapital) * 100;
+  const acc = getActiveAccount();
+  const stockVal = getStockValueOf(acc);
+  const total = acc.cash + stockVal;
+  const delta = total - acc.initialCapital;
+  const pct = (delta / acc.initialCapital) * 100;
 
   document.getElementById('totalValue').textContent = formatNum(total);
-  document.getElementById('cash').textContent = formatYen(state.cash);
+  document.getElementById('cash').textContent = formatYen(acc.cash);
   document.getElementById('stockValue').textContent = formatYen(stockVal);
-  document.getElementById('holdingCount').textContent = Object.keys(state.holdings).length;
+  document.getElementById('holdingCount').textContent = Object.keys(acc.holdings).length;
 
   if (lastTotalValue !== null && stockVal > 0) {
     const wrap = document.getElementById('totalValueWrap');
@@ -855,17 +1008,92 @@ function renderPortfolio() {
   deltaEl.className = `portfolio-delta ${cls}`;
   deltaEl.textContent = `${sign} ${formatYen(Math.abs(delta))} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%) 開始時から`;
 
+  // 口座切替UI
+  const accSwitchEl = document.getElementById('accountSwitch');
+  if (accSwitchEl) accSwitchEl.innerHTML = buildAccountSwitch();
+
   // 資産推移グラフ
   const graphEl = document.getElementById('portfolioGraph');
   if (graphEl) graphEl.innerHTML = buildPortfolioGraph();
   // 資産構成リング
   const ringEl = document.getElementById('allocationRing');
   if (ringEl) ringEl.innerHTML = buildAllocationRing();
+  // マクロ経済パネル
+  const macroEl = document.getElementById('macroPanel');
+  if (macroEl) macroEl.innerHTML = buildMacroPanel();
+}
+
+// ============ 口座切替UI ============
+function buildAccountSwitch() {
+  if (!state.multiMode) {
+    return `<button class="acc-toggle-btn" onclick="toggleMultiMode()">⚙ 複数ポートフォリオを開始</button>`;
+  }
+  const accs = listAccounts();
+  const cards = accs.map(({ id, name, acc }) => {
+    const total = acc.cash + getStockValueOf(acc);
+    const delta = total - acc.initialCapital;
+    const pct = (delta / acc.initialCapital) * 100;
+    const sign = delta >= 0 ? '+' : '';
+    const cls = delta > 0 ? 'positive' : delta < 0 ? 'negative' : 'zero';
+    const isActive = id === state.activeAccount;
+    return `<button class="acc-card ${isActive ? 'acc-active' : ''}" onclick="switchAccount('${id}')">
+      <div class="acc-name">${name}</div>
+      <div class="acc-total">${formatYen(total)}</div>
+      <div class="acc-delta ${cls}">${sign}${pct.toFixed(2)}%</div>
+    </button>`;
+  }).join('');
+  return `<div class="acc-switch-wrap">
+    <div class="acc-switch-header">
+      <span class="acc-switch-title">📂 口座を切り替え</span>
+      <button class="acc-toggle-btn-small" onclick="toggleMultiMode()">単一に戻す</button>
+    </div>
+    <div class="acc-cards">${cards}</div>
+  </div>`;
+}
+
+// ============ マクロ経済パネル ============
+function buildMacroPanel() {
+  if (!state.macro) state.macro = defaultMacro();
+  const m = describeMacro(state.macro);
+  const bar = (v) => {
+    // -1〜+1 を 0〜100% へ
+    const pct = (v + 1) * 50;
+    const knobX = Math.max(2, Math.min(98, pct));
+    return `<div class="macro-bar">
+      <div class="macro-bar-track">
+        <div class="macro-bar-mid"></div>
+        <div class="macro-bar-knob" style="left:${knobX}%"></div>
+      </div>
+    </div>`;
+  };
+  const colorOf = (v) => v > 0.4 ? 'macro-hi' : v < -0.4 ? 'macro-lo' : 'macro-mid';
+  return `<div class="macro-panel">
+    <div class="macro-header">🌐 経済指標(マクロ環境)</div>
+    <div class="macro-row ${colorOf(m.rate.value)}">
+      <div class="macro-label">📈 金利</div>
+      ${bar(m.rate.value)}
+      <div class="macro-state">${m.rate.label}</div>
+      <div class="macro-hint">${m.rate.hint}</div>
+    </div>
+    <div class="macro-row ${colorOf(m.fx.value)}">
+      <div class="macro-label">💴 為替</div>
+      ${bar(m.fx.value)}
+      <div class="macro-state">${m.fx.label}</div>
+      <div class="macro-hint">${m.fx.hint}</div>
+    </div>
+    <div class="macro-row ${colorOf(m.cycle.value)}">
+      <div class="macro-label">🏭 景気</div>
+      ${bar(m.cycle.value)}
+      <div class="macro-state">${m.cycle.label}</div>
+      <div class="macro-hint">${m.cycle.hint}</div>
+    </div>
+  </div>`;
 }
 
 function renderHoldings() {
   const container = document.getElementById('holdingsContent');
-  const tickers = Object.keys(state.holdings);
+  const acc = getActiveAccount();
+  const tickers = Object.keys(acc.holdings);
   if (tickers.length === 0) {
     container.innerHTML = '<div class="no-holdings">まだ何も持っていない。下の銘柄一覧から買ってみよう。</div>';
     return;
@@ -875,7 +1103,7 @@ function renderHoldings() {
   </tr></thead><tbody>`;
   const currentDay = Math.floor(state.simMinute / (24 * 60));
   for (const ticker of tickers) {
-    const h = state.holdings[ticker];
+    const h = acc.holdings[ticker];
     const stock = STOCKS.find(s => s.ticker === ticker);
     const current = state.prices[ticker];
     const holdDays = h.buyMinute != null ? Math.max(0, currentDay - Math.floor(h.buyMinute / (24 * 60))) : '—';
@@ -901,10 +1129,11 @@ function renderHoldings() {
 
 function renderStocks() {
   const grid = document.getElementById('stocksGrid');
+  const acc = getActiveAccount();
   grid.innerHTML = STOCKS.map(stock => {
     const price = state.prices[stock.ticker];
     const prevClose = state.prevClose[stock.ticker];
-    const owned = state.holdings[stock.ticker];
+    const owned = acc.holdings[stock.ticker];
     const change = price - prevClose;
     const pct = prevClose ? (change / prevClose) * 100 : 0;
     const isUp = change >= 0;
@@ -938,11 +1167,12 @@ function renderStocks() {
 
 function renderJournal() {
   const container = document.getElementById('journal');
-  if (state.journal.length === 0) {
+  const acc = getActiveAccount();
+  if (acc.journal.length === 0) {
     container.innerHTML = '<div style="color: var(--ink-dim); font-size: 13px; padding: 20px 0;">まだ日記はない。買ったり売ったりすると、ここに理由が記録される。</div>';
     return;
   }
-  const entries = [...state.journal].reverse().slice(0, 20);
+  const entries = [...acc.journal].reverse().slice(0, 20);
   container.innerHTML = entries.map(e => {
     const simTime = formatSimTime(e.simMinute);
     const actionText = e.action === 'buy' ? '買った' : '売った';
@@ -969,11 +1199,47 @@ function openModal(ticker) {
   updateModalPrice();
   // 詳細チャート描画
   document.getElementById('modalChart').innerHTML = buildDetailChart(ticker);
-  // 会社情報タブ内容
-  const holdInfo = state.holdings[ticker];
+  // 会社情報タブ内容(Phase 3: 詳細解説コンテンツ)
+  const acc = getActiveAccount();
+  const holdInfo = acc.holdings[ticker];
   const holdDays = holdInfo?.buyMinute != null ? Math.max(0, Math.floor(state.simMinute/(24*60)) - Math.floor(holdInfo.buyMinute/(24*60))) : null;
+  const moversHtml = (stock.movers || []).map(m => `
+    <div class="mover-row"><span class="mover-icon">${m.icon}</span><span class="mover-text">${escapeHtml(m.text)}</span></div>
+  `).join('');
+  // 感応度バー(マクロ指標が銘柄にどれだけ影響するか)
+  const sensBar = (label, val, hi, lo) => {
+    const v = val || 0;
+    const pct = Math.min(100, Math.abs(v) * 80);
+    const color = v > 0 ? 'var(--green)' : v < 0 ? 'var(--red)' : 'var(--ink-dim)';
+    const dir = v > 0.05 ? hi : v < -0.05 ? lo : '中立';
+    return `<div class="sens-row">
+      <span class="sens-label">${label}</span>
+      <div class="sens-bar"><div class="sens-fill" style="width:${pct.toFixed(0)}%;background:${color}"></div></div>
+      <span class="sens-dir" style="color:${color}">${dir}</span>
+    </div>`;
+  };
   document.getElementById('modalInfo').innerHTML = `
-    <div class="info-desc">${escapeHtml(stock.desc)}</div>
+    <div class="info-section">
+      <div class="info-section-title">📌 何で稼いでいるか</div>
+      <div class="info-business">${escapeHtml(stock.business || stock.desc)}</div>
+    </div>
+    ${stock.longDesc ? `<div class="info-section">
+      <div class="info-section-title">📖 もっと詳しく</div>
+      <div class="info-longdesc">${escapeHtml(stock.longDesc)}</div>
+    </div>` : ''}
+    ${moversHtml ? `<div class="info-section">
+      <div class="info-section-title">📊 株価が動く要因</div>
+      <div class="movers-list">${moversHtml}</div>
+    </div>` : ''}
+    <div class="info-section">
+      <div class="info-section-title">🌐 マクロ環境への感応度</div>
+      <div class="sens-list">
+        ${sensBar('金利上昇', stock.rateSensitivity, '追い風', '逆風')}
+        ${sensBar('円安進行', stock.fxSensitivity, '追い風', '逆風')}
+        ${sensBar('景気拡大', stock.cycleSensitivity, '追い風', '逆風')}
+      </div>
+      <div class="info-hint">※プラスは「その方向に動くと買われやすい」、マイナスは「売られやすい」</div>
+    </div>
     <div class="info-stats">
       <div><span class="info-label">タグ</span><span>${stock.tag}</span></div>
       <div><span class="info-label">基準株価</span><span>${formatYen(stock.basePrice)}</span></div>
@@ -1014,6 +1280,11 @@ window.switchTab = function(tab) {
   document.getElementById('tabInfo').classList.toggle('active', tab === 'info');
   document.getElementById('tradeForm').style.display = tab === 'info' ? 'none' : '';
   document.getElementById('modalInfo').style.display = tab === 'info' ? '' : 'none';
+  if (tab === 'info') {
+    state.openedInfoTab = true;
+    saveState();
+    checkMissionUnlocks();
+  }
   const btn = document.getElementById('actionBtn');
   const noteField = document.getElementById('noteField');
   const noteLabel = noteField.querySelector('label');
@@ -1035,15 +1306,16 @@ window.switchTab = function(tab) {
 function renderQuickButtons() {
   const container = document.getElementById('quickBtns');
   if (!currentModalStock) { container.innerHTML = ''; return; }
+  const acc = getActiveAccount();
   const price = state.prices[currentModalStock.ticker];
   if (currentTab === 'buy') {
-    const maxBuy = Math.floor(state.cash / price);
+    const maxBuy = Math.floor(acc.cash / price);
     const options = [1, 5, 10].filter(n => n <= maxBuy);
     let html = options.map(n => `<button class="quick-btn" data-qty="${n}">${n}株</button>`).join('');
     if (maxBuy > 0) html += `<button class="quick-btn" data-qty="${maxBuy}">全力(${maxBuy}株)</button>`;
     container.innerHTML = html;
   } else {
-    const owned = state.holdings[currentModalStock.ticker];
+    const owned = acc.holdings[currentModalStock.ticker];
     if (!owned) { container.innerHTML = ''; return; }
     const q = owned.qty;
     const options = [1, Math.floor(q/2), q].filter(n => n > 0);
@@ -1069,6 +1341,7 @@ function calcTax(profit) {
 
 window.updateSummary = function() {
   if (!currentModalStock) return;
+  const acc = getActiveAccount();
   const qty = parseInt(document.getElementById('qty').value) || 0;
   const price = state.prices[currentModalStock.ticker];
   const amount = qty * price;
@@ -1081,11 +1354,11 @@ window.updateSummary = function() {
   if (currentTab === 'buy') {
     const totalCost = amount + commission;
     html += `<div class="row total"><span>合計必要額</span><span>${formatYen(totalCost)}</span></div>`;
-    const afterCash = state.cash - totalCost;
+    const afterCash = acc.cash - totalCost;
     html += `<div class="row" style="color: var(--ink-dim); font-size: 11px; margin-top: 6px;"><span>買った後の現金</span><span style="color:${afterCash < 0 ? 'var(--red)' : 'inherit'}">${formatYen(afterCash)}</span></div>`;
-    btn.disabled = qty <= 0 || totalCost > state.cash;
+    btn.disabled = qty <= 0 || totalCost > acc.cash;
   } else {
-    const owned = state.holdings[currentModalStock.ticker];
+    const owned = acc.holdings[currentModalStock.ticker];
     const ownedQty = owned ? owned.qty : 0;
     const profit = owned ? (price - owned.avgCost) * qty : 0;
     const tax = calcTax(profit);
@@ -1099,6 +1372,7 @@ window.updateSummary = function() {
 };
 
 window.executeTrade = function() {
+  const acc = getActiveAccount();
   const qty = parseInt(document.getElementById('qty').value) || 0;
   const note = document.getElementById('note').value.trim();
   const stock = currentModalStock;
@@ -1108,43 +1382,45 @@ window.executeTrade = function() {
   const commission = calcCommission(total);
   if (currentTab === 'buy') {
     const totalCost = total + commission;
-    if (totalCost > state.cash || qty <= 0) return;
-    state.cash -= totalCost;
-    if (!state.totalCommission) state.totalCommission = 0;
-    state.totalCommission += commission;
-    const existing = state.holdings[stock.ticker];
+    if (totalCost > acc.cash || qty <= 0) return;
+    acc.cash -= totalCost;
+    if (!acc.totalCommission) acc.totalCommission = 0;
+    acc.totalCommission += commission;
+    const existing = acc.holdings[stock.ticker];
     if (existing) {
       const newQty = existing.qty + qty;
       const newAvg = ((existing.avgCost * existing.qty) + (price * qty)) / newQty;
-      state.holdings[stock.ticker] = { qty: newQty, avgCost: newAvg, buyMinute: existing.buyMinute };
+      acc.holdings[stock.ticker] = { qty: newQty, avgCost: newAvg, buyMinute: existing.buyMinute };
     } else {
-      state.holdings[stock.ticker] = { qty, avgCost: price, buyMinute: state.simMinute };
+      acc.holdings[stock.ticker] = { qty, avgCost: price, buyMinute: state.simMinute };
     }
-    state.journal.push({
+    acc.journal.push({
       simMinute: state.simMinute, action: 'buy', ticker: stock.ticker, stockName: stock.name,
-      qty, price, total, commission, note
+      qty, price, total, commission, note,
+      macroSnapshot: state.macro ? { ...state.macro } : null,
     });
     showToast(`${stock.name}を${qty}株 買った (手数料 ${formatYen(commission)})`);
   } else {
-    const existing = state.holdings[stock.ticker];
+    const existing = acc.holdings[stock.ticker];
     if (!existing || qty > existing.qty) return;
     const profit = (price - existing.avgCost) * qty;
     const tax = calcTax(profit);
     const netReceive = total - commission - tax;
-    state.cash += netReceive;
-    if (!state.totalCommission) state.totalCommission = 0;
-    if (!state.totalTax) state.totalTax = 0;
-    state.totalCommission += commission;
-    state.totalTax += tax;
+    acc.cash += netReceive;
+    if (!acc.totalCommission) acc.totalCommission = 0;
+    if (!acc.totalTax) acc.totalTax = 0;
+    acc.totalCommission += commission;
+    acc.totalTax += tax;
     if (existing.qty === qty) {
-      delete state.holdings[stock.ticker];
+      delete acc.holdings[stock.ticker];
     } else {
-      state.holdings[stock.ticker] = { qty: existing.qty - qty, avgCost: existing.avgCost, buyMinute: existing.buyMinute };
+      acc.holdings[stock.ticker] = { qty: existing.qty - qty, avgCost: existing.avgCost, buyMinute: existing.buyMinute };
     }
     const taxMsg = tax > 0 ? ` 税${formatYen(tax)}` : '';
-    state.journal.push({
+    acc.journal.push({
       simMinute: state.simMinute, action: 'sell', ticker: stock.ticker, stockName: stock.name,
-      qty, price, total, commission, tax, profit, note
+      qty, price, total, commission, tax, profit, note,
+      macroSnapshot: state.macro ? { ...state.macro } : null,
     });
     showToast(`${stock.name}を${qty}株 売った (手取り ${formatYen(netReceive)}${taxMsg})`);
   }
@@ -1301,6 +1577,38 @@ const TUTORIAL_STEPS = [
 <span style="color:var(--green)">緑</span> = 値上がりした期間、<span style="color:var(--red)">赤</span> = 値下がりした期間の出来高です。</p>`,
   },
   {
+    title: '🌐 経済指標(マクロ環境)を読もう',
+    body: `<p>資産合計の下にある「<strong>🌐 経済指標</strong>」パネルを見てみよう。</p>
+<p>株価は会社の業績だけでなく、<strong>世の中全体の経済の状況</strong>でも動きます。表示されているのは3つの指標です:</p>
+<table class="tut-table">
+  <tr><td>📈 金利</td><td>銀行株は金利上昇で買われやすい / 借金が多い企業は逆風</td></tr>
+  <tr><td>💴 為替</td><td>円安は車・ゲームなどの輸出企業に追い風 / 輸入企業は逆風</td></tr>
+  <tr><td>🏭 景気</td><td>好景気は銀行・レジャー株に追い風 / 不景気では食品・通信などディフェンシブ株が買われやすい</td></tr>
+</table>
+<p style="margin-top:10px">指標は時間とともに変化し、ニュースで大きく動くこともあります。<strong>銘柄ごとの「マクロ感応度」</strong>(情報タブで見られる)と組み合わせて読むと、なぜ株が動いたかが見えてきます。</p>`,
+  },
+  {
+    title: '📖 銘柄解説で「会社」を知ろう',
+    body: `<p>銘柄カードをタップして「<strong>ℹ 情報</strong>」タブを開いてみよう。</p>
+<ul class="tut-list">
+  <li><strong>📌 何で稼いでいるか</strong> — 会社のビジネスを一行で</li>
+  <li><strong>📖 もっと詳しく</strong> — 中学生向けの会社解説</li>
+  <li><strong>📊 株価が動く要因</strong> — どんなニュースで株価が動きやすいか</li>
+  <li><strong>🌐 マクロ環境への感応度</strong> — 金利・為替・景気のどれに敏感かをグラフで</li>
+</ul>
+<p style="margin-top:10px">「<strong>なぜこの会社は儲かる(儲からない)のか?</strong>」を理解してから買うと、値動きの理由が分かるようになります。</p>`,
+  },
+  {
+    title: '📂 複数ポートフォリオで戦略を比較',
+    body: `<p>資産パネルにある「<strong>⚙ 複数ポートフォリオを開始</strong>」を押すと、2つの口座を並走できます。</p>
+<table class="tut-table">
+  <tr><td style="color:var(--red)">積極運用</td><td>50万円。値動きの大きい銘柄に挑戦してみる用</td></tr>
+  <tr><td style="color:#4ecdc4">守り重視</td><td>50万円。ディフェンシブ銘柄や分散運用で守る用</td></tr>
+</table>
+<p style="margin-top:10px">同じ期間・同じ市場環境で、<strong>どちらの戦略が結果的に良かったか</strong>を比較できます。資産推移グラフは%基準で重ね描きされます。</p>
+<p style="margin-top:10px;color:var(--ink-dim);font-size:12px">⚠️ メイン口座とは別の世界線です。元に戻すこともできます(データは保持)。</p>`,
+  },
+  {
     title: '🏆 ミッションに挑戦しよう',
     body: `<p>右上の<strong>「🏆 ミッション」</strong>ボタンで達成目標の一覧が見られます。</p>
 <p>チュートリアルで学んだことを実際に試して、ミッションを達成しよう！</p>
@@ -1308,7 +1616,8 @@ const TUTORIAL_STEPS = [
   <li>📌 まず「はじめての買い」から挑戦</li>
   <li>📌 「なぜ買う？」を入力してから購入してみよう</li>
   <li>📌 3銘柄以上に分散してみよう</li>
-  <li>📌 ニュースイベントが来たらチャートを確認しよう</li>
+  <li>📌 銘柄の「ℹ 情報」タブで会社解説を読もう</li>
+  <li>📌 マクロ環境が大きく振れるタイミングで取引しよう</li>
 </ul>
 <p style="margin-top:12px; color:var(--ink-dim); font-size:12px">保護者の方: 「📋 保護者レポート」ボタンで子どものトレード記録・理由・達成ミッションを一覧できます。</p>`,
   },
@@ -1352,20 +1661,21 @@ function renderTutorial() {
 
 // ============ 保護者向けレポート（Phase 2） ============
 window.openParentReport = function() {
-  const total = state.cash + getTotalStockValue();
-  const delta = total - state.initialCapital;
+  const acc = getActiveAccount();
+  const total = acc.cash + getStockValueOf(acc);
+  const delta = total - acc.initialCapital;
   const deltaSign = delta >= 0 ? '▲' : '▼';
   const deltaColor = delta >= 0 ? 'var(--green)' : 'var(--red)';
   const currentDay = Math.floor(state.simMinute / (24 * 60));
 
   // 直近7日のトレード
-  const recentTrades = state.journal.filter(e => {
+  const recentTrades = acc.journal.filter(e => {
     const tradeDay = Math.floor(e.simMinute / (24 * 60));
     return currentDay - tradeDay <= 7;
   });
 
   // 保有中の銘柄
-  const holdingRows = Object.entries(state.holdings).map(([ticker, h]) => {
+  const holdingRows = Object.entries(acc.holdings).map(([ticker, h]) => {
     const cur = state.prices[ticker];
     const pnl = (cur - h.avgCost) * h.qty;
     const holdDays = h.buyMinute != null ? Math.max(0, currentDay - Math.floor(h.buyMinute / (24*60))) : '—';
@@ -1396,19 +1706,20 @@ window.openParentReport = function() {
       }).join('')
     : '<tr><td colspan="3" style="color:var(--ink-dim)">直近7日間のトレードなし</td></tr>';
 
-  const commissionTotal = state.totalCommission || 0;
-  const taxTotal = state.totalTax || 0;
+  const commissionTotal = acc.totalCommission || 0;
+  const taxTotal = acc.totalTax || 0;
+  const accLabel = state.multiMode ? `(${state.activeAccount === 'aggressive' ? '積極運用' : '守り重視'}口座)` : '';
 
   document.getElementById('parentReportContent').innerHTML = `
-    <h2 class="tut-title">📋 保護者向けレポート</h2>
+    <h2 class="tut-title">📋 保護者向けレポート ${accLabel}</h2>
     <div class="report-date">シム経過: ${formatSimTime(state.simMinute)} (${currentDay}日目)</div>
 
     <div class="report-section">
       <div class="report-label">💰 資産状況</div>
       <table class="report-table">
-        <tr><td>初期資金</td><td>${formatYen(state.initialCapital)}</td></tr>
+        <tr><td>初期資金</td><td>${formatYen(acc.initialCapital)}</td></tr>
         <tr><td>現在の総資産</td><td><strong>${formatYen(total)}</strong></td></tr>
-        <tr><td>損益</td><td style="color:${deltaColor}">${deltaSign} ${formatYen(Math.abs(delta))} (${(delta/state.initialCapital*100).toFixed(2)}%)</td></tr>
+        <tr><td>損益</td><td style="color:${deltaColor}">${deltaSign} ${formatYen(Math.abs(delta))} (${(delta/acc.initialCapital*100).toFixed(2)}%)</td></tr>
         <tr><td>支払い手数料累計</td><td style="color:var(--ink-dim)">${formatYen(commissionTotal)}</td></tr>
         <tr><td>支払い税金累計</td><td style="color:var(--ink-dim)">${formatYen(taxTotal)}</td></tr>
       </table>
@@ -1445,18 +1756,33 @@ window.printParentReport = function() {
   window.print();
 };
 
-// ============ ミッション（Phase 2） ============
+// ============ ミッション（Phase 2 / 拡張: Phase 3） ============
+// check は state を受け取り、いずれかの口座で達成すれば true。
+function eachAccount(s, fn) {
+  const list = [];
+  if (s.multiMode && s.accounts) {
+    list.push(s.accounts.aggressive, s.accounts.defensive);
+  } else {
+    list.push(s);
+  }
+  return list.some(fn);
+}
+
 const MISSIONS = [
-  { id: 'm01', title: 'はじめての買い',    desc: '株を1株以上買ってみよう',              check: (s) => s.journal.some(e => e.action === 'buy') },
-  { id: 'm02', title: '理由を書こう',      desc: '「なぜ買うか」を入力して購入しよう',    check: (s) => s.journal.some(e => e.action === 'buy' && e.note && e.note.length >= 5) },
-  { id: 'm03', title: 'はじめての売り',    desc: '保有株を1株以上売ってみよう',          check: (s) => s.journal.some(e => e.action === 'sell') },
-  { id: 'm04', title: '3銘柄に分散',       desc: '3種類以上の銘柄を同時に保有しよう',    check: (s) => Object.keys(s.holdings).length >= 3 },
-  { id: 'm05', title: '5銘柄に分散',       desc: '5種類以上の銘柄を同時に保有しよう',    check: (s) => Object.keys(s.holdings).length >= 5 },
-  { id: 'm06', title: 'プラス転換！',       desc: '総資産が初期資金を上回ろう',           check: (s) => (s.cash + Object.entries(s.holdings).reduce((a,[t,h]) => a + (s.prices[t]||0)*h.qty, 0)) > s.initialCapital },
-  { id: 'm07', title: '10回トレード',       desc: 'トレードを合計10回以上しよう',         check: (s) => s.journal.length >= 10 },
+  { id: 'm01', title: 'はじめての買い',    desc: '株を1株以上買ってみよう',              check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'buy')) },
+  { id: 'm02', title: '理由を書こう',      desc: '「なぜ買うか」を入力して購入しよう',    check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'buy' && e.note && e.note.length >= 5)) },
+  { id: 'm03', title: 'はじめての売り',    desc: '保有株を1株以上売ってみよう',          check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'sell')) },
+  { id: 'm04', title: '3銘柄に分散',       desc: '3種類以上の銘柄を同時に保有しよう',    check: (s) => eachAccount(s, a => Object.keys(a.holdings).length >= 3) },
+  { id: 'm05', title: '5銘柄に分散',       desc: '5種類以上の銘柄を同時に保有しよう',    check: (s) => eachAccount(s, a => Object.keys(a.holdings).length >= 5) },
+  { id: 'm06', title: 'プラス転換！',       desc: '総資産が初期資金を上回ろう',           check: (s) => eachAccount(s, a => (a.cash + Object.entries(a.holdings).reduce((acc,[t,h]) => acc + (s.prices[t]||0)*h.qty, 0)) > a.initialCapital) },
+  { id: 'm07', title: '10回トレード',       desc: 'トレードを合計10回以上しよう',         check: (s) => eachAccount(s, a => a.journal.length >= 10) },
   { id: 'm08', title: 'ニュースを活かせ',   desc: 'ニュースイベントが5回以上発生するまで運用しよう', check: (s) => (s.firedNewsIds||[]).length >= 5 },
   { id: 'm09', title: '1週間続けた',       desc: 'シム内7日間以上運用しよう',            check: (s) => Math.floor(s.simMinute / (24*60)) >= 7 },
   { id: 'm10', title: '長期投資家',         desc: 'シム内30日間以上運用しよう',           check: (s) => Math.floor(s.simMinute / (24*60)) >= 30 },
+  // Phase 3 追加ミッション
+  { id: 'm11', title: '銘柄解説を読んだ',   desc: '銘柄の「ℹ 情報」タブを開いてみよう',  check: (s) => s.openedInfoTab === true },
+  { id: 'm12', title: 'マクロを意識',       desc: 'マクロ環境(金利/為替/景気)が大きく振れる場面で取引しよう', check: (s) => eachAccount(s, a => a.journal.some(e => e.macroSnapshot && (Math.abs(e.macroSnapshot.rate) > 0.4 || Math.abs(e.macroSnapshot.fx) > 0.4 || Math.abs(e.macroSnapshot.cycle) > 0.4))) },
+  { id: 'm13', title: '2口座で並走',       desc: '複数ポートフォリオモードで両方の口座で売買しよう', check: (s) => s.multiMode && s.accounts && (s.accounts.aggressive.journal.length > 0) && (s.accounts.defensive.journal.length > 0) },
 ];
 
 function getMissionStatus() {
@@ -1503,22 +1829,28 @@ function checkMissionUnlocks() {
 
 // ============ 日記エクスポート（Phase 2） ============
 window.exportJournal = function() {
-  const total = state.cash + getTotalStockValue();
-  const delta = total - state.initialCapital;
+  const acc = getActiveAccount();
+  const total = acc.cash + getStockValueOf(acc);
+  const delta = total - acc.initialCapital;
   const sign = delta >= 0 ? '+' : '';
+  const accLabel = state.multiMode ? `(${state.activeAccount === 'aggressive' ? '積極運用' : '守り重視'}口座)` : '';
   const lines = [
-    `カブラボ トレード日記`,
+    `カブラボ トレード日記 ${accLabel}`,
     `エクスポート日時: ${new Date().toLocaleString('ja-JP')}`,
     `シム経過: ${formatSimTime(state.simMinute)}`,
-    `初期資金: ¥${state.initialCapital.toLocaleString('ja-JP')}`,
+    `初期資金: ¥${acc.initialCapital.toLocaleString('ja-JP')}`,
     `現在資産: ¥${Math.round(total).toLocaleString('ja-JP')} (${sign}¥${Math.round(Math.abs(delta)).toLocaleString('ja-JP')})`,
     ``,
     `===== トレード履歴 =====`,
   ];
-  state.journal.forEach((e, i) => {
+  acc.journal.forEach((e, i) => {
     const act = e.action === 'buy' ? '買い' : '売り';
     lines.push(`[${i+1}] ${formatSimTime(e.simMinute)} - ${e.stockName}(${e.ticker}) ${act} ${e.qty}株 @ ¥${Math.round(e.price).toLocaleString('ja-JP')} (合計¥${Math.round(e.total).toLocaleString('ja-JP')})`);
     lines.push(`    理由: ${e.note || '(記録なし)'}`);
+    if (e.macroSnapshot) {
+      const m = e.macroSnapshot;
+      lines.push(`    そのときのマクロ環境: 金利${m.rate.toFixed(2)} / 為替${m.fx.toFixed(2)} / 景気${m.cycle.toFixed(2)}`);
+    }
   });
   const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);

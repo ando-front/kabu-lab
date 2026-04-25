@@ -467,3 +467,173 @@ header {
   .portfolio-stats { grid-template-columns: 1fr 1fr; }
   .portfolio-stats > div:last-child { grid-column: 1 / -1; }
 }
+
+/* ============ Phase 3: マクロ経済パネル ============ */
+.macro-panel-wrap { margin-bottom: 28px; }
+.macro-panel {
+  background: var(--bg-soft); border: 1px solid var(--border);
+  border-radius: 4px; padding: 18px 20px; position: relative; overflow: hidden;
+}
+.macro-panel::before {
+  content: 'MACRO'; position: absolute; top: 8px; right: 12px;
+  font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  color: var(--ink-dim); letter-spacing: 3px;
+}
+.macro-header {
+  font-family: 'DotGothic16', monospace; font-size: 14px;
+  color: var(--accent); margin-bottom: 14px; letter-spacing: 1px;
+}
+.macro-row {
+  display: grid;
+  grid-template-columns: 70px 1fr 90px;
+  grid-template-rows: auto auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border);
+}
+.macro-row:last-child { border-bottom: none; }
+.macro-label {
+  font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  color: var(--ink); grid-row: 1 / 3;
+}
+.macro-state {
+  font-family: 'Zen Kaku Gothic New', sans-serif; font-size: 12px;
+  font-weight: 700; text-align: right;
+}
+.macro-hint {
+  grid-column: 2 / 4;
+  font-size: 11px; color: var(--ink-dim);
+  margin-top: 2px;
+}
+.macro-bar { width: 100%; }
+.macro-bar-track {
+  position: relative; height: 8px;
+  background: linear-gradient(90deg, rgba(255,107,107,0.18) 0%, rgba(123,216,143,0.05) 50%, rgba(123,216,143,0.18) 100%);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.macro-bar-mid {
+  position: absolute; left: 50%; top: -2px; bottom: -2px;
+  width: 1px; background: var(--ink-dim);
+}
+.macro-bar-knob {
+  position: absolute; top: 50%; transform: translate(-50%, -50%);
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(249, 199, 79, 0.6);
+  transition: left 0.4s ease;
+}
+.macro-row.macro-hi .macro-state { color: var(--green); }
+.macro-row.macro-lo .macro-state { color: var(--red); }
+.macro-row.macro-mid .macro-state { color: var(--ink-dim); }
+.macro-row.macro-hi .macro-bar-knob { background: var(--green); box-shadow: 0 0 8px var(--green-glow); }
+.macro-row.macro-lo .macro-bar-knob { background: var(--red); box-shadow: 0 0 8px var(--red-glow); }
+
+/* ============ Phase 2残: 複数ポートフォリオ切替UI ============ */
+.account-switch { margin: 16px 0 8px; }
+.acc-toggle-btn {
+  background: transparent; border: 1px dashed var(--border);
+  color: var(--ink-dim); padding: 8px 14px; border-radius: 3px;
+  font-size: 12px; cursor: pointer; font-family: 'JetBrains Mono', monospace;
+  transition: all 0.2s;
+}
+.acc-toggle-btn:hover {
+  border-color: var(--green); color: var(--green);
+}
+.acc-toggle-btn-small {
+  background: transparent; border: none;
+  color: var(--ink-dim); font-size: 11px; cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  text-decoration: underline;
+}
+.acc-toggle-btn-small:hover { color: var(--ink); }
+.acc-switch-wrap {
+  background: rgba(20, 28, 24, 0.5); border: 1px solid var(--border);
+  border-radius: 4px; padding: 12px 14px;
+}
+.acc-switch-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 10px;
+}
+.acc-switch-title {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--ink-dim); letter-spacing: 1px;
+}
+.acc-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.acc-card {
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; padding: 10px 12px; cursor: pointer;
+  text-align: left; transition: all 0.15s;
+  font-family: inherit;
+}
+.acc-card:hover { border-color: var(--accent); }
+.acc-card.acc-active {
+  border-color: var(--green); box-shadow: 0 0 0 1px var(--green) inset;
+  background: rgba(123, 216, 143, 0.05);
+}
+.acc-name { font-size: 12px; color: var(--ink); font-weight: 700; }
+.acc-total {
+  font-family: 'JetBrains Mono', monospace; font-size: 16px;
+  color: var(--ink); margin-top: 4px;
+}
+.acc-delta {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; margin-top: 2px;
+}
+.acc-delta.positive { color: var(--green); }
+.acc-delta.negative { color: var(--red); }
+.acc-delta.zero { color: var(--ink-dim); }
+
+/* ============ Phase 3: 銘柄解説コンテンツ ============ */
+.info-section {
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed var(--border);
+}
+.info-section:last-of-type { border-bottom: none; }
+.info-section-title {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--accent); letter-spacing: 1px; margin-bottom: 8px;
+}
+.info-business {
+  font-size: 13px; line-height: 1.7; color: var(--ink);
+}
+.info-longdesc {
+  font-size: 12px; line-height: 1.8; color: var(--ink-dim);
+}
+.movers-list { display: flex; flex-direction: column; gap: 6px; }
+.mover-row {
+  display: flex; gap: 8px; align-items: flex-start;
+  background: rgba(123, 216, 143, 0.04);
+  border-left: 2px solid var(--border);
+  padding: 6px 10px; font-size: 12px; line-height: 1.6;
+}
+.mover-icon { flex-shrink: 0; font-size: 14px; }
+.mover-text { color: var(--ink); }
+
+/* 感応度バー */
+.sens-list { display: flex; flex-direction: column; gap: 5px; margin-bottom: 6px; }
+.sens-row {
+  display: grid; grid-template-columns: 80px 1fr 60px;
+  gap: 8px; align-items: center; font-size: 11px;
+}
+.sens-label { color: var(--ink-dim); font-family: 'JetBrains Mono', monospace; }
+.sens-bar {
+  height: 6px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+}
+.sens-fill { height: 100%; transition: width 0.3s; }
+.sens-dir {
+  font-size: 10px; text-align: right;
+  font-family: 'JetBrains Mono', monospace;
+}
+.info-hint {
+  font-size: 10px; color: var(--ink-dim);
+  margin-top: 4px; line-height: 1.5;
+}
+
+@media (max-width: 600px) {
+  .acc-cards { grid-template-columns: 1fr; }
+  .macro-row {
+    grid-template-columns: 60px 1fr 70px;
+  }
+}

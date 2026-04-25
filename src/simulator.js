@@ -7,15 +7,75 @@ function randomNormal() {
 }
 
 // 1分進んだときの新しい価格を返す
-export function tickPrice(currentPrice, stock) {
+// macro: { rate, fx, cycle } -1〜+1 の正規化値(各々金利・円安度・景気)
+export function tickPrice(currentPrice, stock, macro = null) {
   const dt = 1 / 360; // 1営業日=6時間=360分として、1分の占める割合
   const shock = randomNormal();
-  const change = stock.drift * dt + stock.vol * Math.sqrt(dt) * shock;
+  // マクロ環境からのドリフト追加(stockの感応度 × マクロ強度)
+  let macroDrift = 0;
+  if (macro) {
+    const rs = stock.rateSensitivity || 0;
+    const fs = stock.fxSensitivity || 0;
+    const cs = stock.cycleSensitivity || 0;
+    // 各マクロ要素を年率±2%程度の影響として加算
+    macroDrift = (rs * macro.rate + fs * macro.fx + cs * macro.cycle) * 0.0002;
+  }
+  const change = (stock.drift + macroDrift) * dt + stock.vol * Math.sqrt(dt) * shock;
   let newPrice = currentPrice * (1 + change);
   // サーキットブレーカー的に1tick最大±5%で抑制(教育用)
   newPrice = Math.max(currentPrice * 0.95, Math.min(currentPrice * 1.05, newPrice));
   // 100円未満は小数1位、それ以上は整数に丸め
   return newPrice < 100 ? Math.round(newPrice * 10) / 10 : Math.round(newPrice);
+}
+
+// ============ マクロ経済指標 ============
+// 各指標は -1〜+1 のレンジで動く緩やかな確率過程
+// rate:  +1=金利大幅上昇 -1=大幅低下 (0=中立)
+// fx:    +1=円安進行(輸出有利) -1=円高
+// cycle: +1=好景気 -1=不景気
+export function defaultMacro() {
+  return { rate: 0, fx: 0, cycle: 0 };
+}
+
+// 1tickあたりマクロを少しだけランダムウォークさせる(平均回帰あり)
+export function evolveMacro(macro) {
+  const out = { ...macro };
+  for (const k of ['rate', 'fx', 'cycle']) {
+    const meanReversion = -macro[k] * 0.0005;            // 0方向に弱く戻る
+    const noise = randomNormal() * 0.003;                // 小さな乱数
+    let v = macro[k] + meanReversion + noise;
+    v = Math.max(-1, Math.min(1, v));
+    out[k] = v;
+  }
+  return out;
+}
+
+// マクロ環境を分かりやすい解説テキストへ
+export function describeMacro(macro) {
+  const labelOf = (v, hi, mid, lo) => v > 0.4 ? hi : v < -0.4 ? lo : mid;
+  return {
+    rate: {
+      value: macro.rate,
+      label: labelOf(macro.rate, '高金利局面', '中立', '低金利局面'),
+      hint: macro.rate > 0.4 ? '銀行株に追い風 / 借金が多い企業に逆風'
+          : macro.rate < -0.4 ? '銀行株に逆風 / 借入の多い企業に追い風'
+          : '金利は落ち着いている',
+    },
+    fx: {
+      value: macro.fx,
+      label: labelOf(macro.fx, '円安', '中立', '円高'),
+      hint: macro.fx > 0.4 ? '輸出企業(車・ゲーム)に追い風 / 輸入企業に逆風'
+          : macro.fx < -0.4 ? '輸入企業に追い風 / 輸出企業に逆風'
+          : '為替は安定',
+    },
+    cycle: {
+      value: macro.cycle,
+      label: labelOf(macro.cycle, '好景気', '中立', '不景気'),
+      hint: macro.cycle > 0.4 ? '景気敏感株(レジャー・銀行)に追い風'
+          : macro.cycle < -0.4 ? 'ディフェンシブ株(食品・通信)が買われやすい'
+          : '景気は普通',
+    },
+  };
 }
 
 // 市場が開いているか(シム時刻: 9:00-15:00)
@@ -57,6 +117,13 @@ export const NEWS_EVENTS = [
   { id: 'n16', ticker: null, tag: null, headline: '日銀、大規模金融緩和を維持と発表', detail: 'リスクオン相場が続きやすい環境。株式市場全体に買いの流れが生まれやすい。', effect: 0.02 },
   { id: 'n17', ticker: null, tag: null, headline: '米国で景気後退懸念が高まる', detail: '世界経済への影響から、日本株にも売り圧力がかかりやすい。リスク回避の動き。', effect: -0.025 },
   { id: 'n18', ticker: null, tag: 'ゲーム', headline: 'ゲーム業界、世界の市場規模が過去最大に', detail: 'モバイル・コンソール合計でゲーム市場が急拡大。関連銘柄に投資マネーが流入。', effect: 0.05 },
+  // マクロ経済イベント(macroで指標自体を動かす)
+  { id: 'm01', ticker: null, tag: null, headline: '日銀、政策金利の追加利上げを発表', detail: '景気の過熱を抑えるため利上げ。銀行株には追い風だが、借入の多い企業には逆風。', effect: 0, macro: { rate: 0.4 } },
+  { id: 'm02', ticker: null, tag: null, headline: '日銀、金融緩和を強化し利下げに踏み切る', detail: '景気下支えのため利下げ。銀行株には逆風だが、市場全体には買い材料になりやすい。', effect: 0.01, macro: { rate: -0.4 } },
+  { id: 'm03', ticker: null, tag: null, headline: '為替、急速な円安が進行', detail: '1ドル=160円台へ。輸出企業の海外利益が膨らむ一方、輸入コストが上がる業種は逆風。', effect: 0, macro: { fx: 0.5 } },
+  { id: 'm04', ticker: null, tag: null, headline: '為替、急激な円高で輸出株に売り', detail: '1ドル=130円台へ円高。海外売上比率が高い企業の利益が目減りする懸念。', effect: 0, macro: { fx: -0.5 } },
+  { id: 'm05', ticker: null, tag: null, headline: '景気指数、過去最高水準に上昇', detail: '消費・設備投資が堅調で景気拡大局面。レジャーや銀行など景気敏感株に買いが入りやすい。', effect: 0.015, macro: { cycle: 0.5 } },
+  { id: 'm06', ticker: null, tag: null, headline: '景気指数が大幅悪化、リセッション懸念', detail: '消費低迷・企業業績悪化の予想。ディフェンシブ株(食品・通信)へ資金が逃避しやすい。', effect: -0.02, macro: { cycle: -0.5 } },
 ];
 
 // 発生確率：1tick（1分）あたりの自然発生率
