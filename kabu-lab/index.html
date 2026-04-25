@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>カブラボ — はじめての株シミュレータ</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">KABU_LAB</div>
+    <div class="clock">
+      <span class="mode-badge">SIM</span>
+      市場時間 <span id="simClock">Day 1 · 09:00</span>
+      <div class="speed-control">
+        <button class="speed-btn" onclick="setSpeed(0, this)">⏸</button>
+        <button class="speed-btn active" onclick="setSpeed(1, this)">1x</button>
+        <button class="speed-btn" onclick="setSpeed(5, this)">5x</button>
+        <button class="speed-btn" onclick="setSpeed(20, this)">20x</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="onboarding" class="onboarding">
+    <button class="onboarding-close" onclick="dismissOnboarding()">×</button>
+    <h3>ようこそ、カブラボへ</h3>
+    <p>
+      100万円の仮想マネーで、株のトレード体験ができる。<br>
+      <strong style="color: var(--yellow)">損してもリアルなお金は減らない。</strong>だから、思い切って色々試してみよう。<br>
+      ルール:「なぜ買ったか」を必ず記録すること。あとで見返すと、自分の思考の癖がわかるよ。<br>
+      <small style="color: var(--ink-dim)">※株価は実際の水準をもとにシミュレート。右上で時間を早送りできる(20倍にすると1分で数日分)。</small>
+    </p>
+  </div>
+
+  <div class="portfolio">
+    <div class="portfolio-label">資産合計</div>
+    <div class="portfolio-value" id="totalValueWrap">
+      <span class="yen">¥</span><span id="totalValue">1,000,000</span>
+    </div>
+    <div id="totalDelta" class="portfolio-delta zero">— (開始時から)</div>
+    <div class="portfolio-stats">
+      <div><div class="stat-label">現金</div><div class="stat-value" id="cash">¥1,000,000</div></div>
+      <div><div class="stat-label">株の評価額</div><div class="stat-value" id="stockValue">¥0</div></div>
+      <div><div class="stat-label">保有銘柄</div><div class="stat-value" id="holdingCount">0</div></div>
+    </div>
+  </div>
+
+  <div class="section-title">保有銘柄</div>
+  <div class="holdings"><div id="holdingsContent"></div></div>
+
+  <div class="section-title">銘柄一覧 — タップして詳細</div>
+  <div id="stocksGrid" class="stocks"></div>
+
+  <div class="section-title">トレード日記</div>
+  <div id="journal"></div>
+</div>
+
+<div class="modal-backdrop" id="modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal()">×</button>
+    <h2 id="modalName">—</h2>
+    <div class="modal-subtitle" id="modalTicker">—</div>
+    <div class="big-price" id="modalPrice">—</div>
+    <div class="big-change" id="modalChange">—</div>
+    <div class="tab-switch">
+      <button class="tab-btn active" id="tabBuy" onclick="switchTab('buy')">買う</button>
+      <button class="tab-btn" id="tabSell" onclick="switchTab('sell')">売る</button>
+    </div>
+    <div id="tradeForm">
+      <div class="field">
+        <label id="qtyLabel">株数</label>
+        <input type="number" id="qty" min="1" step="1" value="1" oninput="updateSummary()">
+        <div class="quick-buttons" id="quickBtns"></div>
+      </div>
+      <div class="field" id="noteField">
+        <label>なぜ買う(売る)? — これが一番大事</label>
+        <textarea id="note" placeholder="例: ゲーム会社で好きだから。新作が出そう。"></textarea>
+      </div>
+      <div class="trade-summary" id="summary"></div>
+      <button class="action-btn buy-btn" id="actionBtn" onclick="executeTrade()">買う</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="module" src="src/app.js"></script>
+</body>
+</html>
