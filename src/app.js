@@ -49,14 +49,40 @@ function saveState() {
 }
 
 let state = loadState();
-let priceHistory = {};
+let priceHistory = {};      // {ticker: [{t, price}]} - スパークライン用
+let candleHistory = {};     // {ticker: [{t, open, high, low, close, vol}]} - テクニカル用
 let currentModalStock = null;
 let currentTab = 'buy';
+let currentChartType = 'line'; // line | candle | ma | bb | rsi | volume
 let simSpeed = 1;
 let simTickTimer = null;
 let lastPrices = {};
 let lastTotalValue = null;
 let activeNewsEvent = null; // 表示中のニュース
+
+// ============ ローソク足バー構築ヘルパー ============
+// 5分足キャンドルを生成
+let candleBuffer = {}; // {ticker: {open, high, low, close, vol, barStart}}
+const CANDLE_MIN = 15; // 15分足
+
+function pushTick(ticker, price) {
+  const barStart = state.simMinute - (state.simMinute % CANDLE_MIN);
+  if (!candleBuffer[ticker] || candleBuffer[ticker].barStart !== barStart) {
+    // 前のバーを確定
+    if (candleBuffer[ticker]) {
+      if (!candleHistory[ticker]) candleHistory[ticker] = [];
+      candleHistory[ticker].push({ ...candleBuffer[ticker] });
+      if (candleHistory[ticker].length > 120) candleHistory[ticker].shift();
+    }
+    candleBuffer[ticker] = { barStart, open: price, high: price, low: price, close: price, vol: 1 };
+  } else {
+    const b = candleBuffer[ticker];
+    b.high = Math.max(b.high, price);
+    b.low  = Math.min(b.low, price);
+    b.close = price;
+    b.vol++;
+  }
+}
 
 // ============ 初期化 ============
 function initPrices() {
@@ -77,6 +103,7 @@ function simTick() {
       if (!priceHistory[stock.ticker]) priceHistory[stock.ticker] = [];
       priceHistory[stock.ticker].push({ t: state.simMinute, price: state.prices[stock.ticker] });
       if (priceHistory[stock.ticker].length > 150) priceHistory[stock.ticker].shift();
+      pushTick(stock.ticker, state.prices[stock.ticker]);
     });
   }
 
@@ -160,25 +187,152 @@ function buildSparkline(ticker, isUp) {
   </svg>`;
 }
 
-// ① 銘柄詳細チャート（モーダル内・大きめ・売買マーカー付き）
+// ============ テクニカル計算ヘルパー ============
+function calcSMA(arr, n) {
+  return arr.map((_, i) => {
+    if (i < n - 1) return null;
+    return arr.slice(i - n + 1, i + 1).reduce((s, v) => s + v, 0) / n;
+  });
+}
+
+function calcEMA(arr, n) {
+  const k = 2 / (n + 1);
+  const out = Array(arr.length).fill(null);
+  let startIdx = arr.findIndex(v => v !== null);
+  if (startIdx < 0) return out;
+  out[startIdx + n - 1] = arr.slice(startIdx, startIdx + n).reduce((s, v) => s + v, 0) / n;
+  for (let i = startIdx + n; i < arr.length; i++) {
+    out[i] = arr[i] * k + out[i - 1] * (1 - k);
+  }
+  return out;
+}
+
+function calcBB(closes, n = 20, mult = 2) {
+  const mid = calcSMA(closes, n);
+  return closes.map((_, i) => {
+    if (mid[i] === null) return { mid: null, upper: null, lower: null };
+    const slice = closes.slice(i - n + 1, i + 1);
+    const mean = mid[i];
+    const sd = Math.sqrt(slice.reduce((s, v) => s + (v - mean) ** 2, 0) / n);
+    return { mid: mean, upper: mean + mult * sd, lower: mean - mult * sd };
+  });
+}
+
+function calcRSI(closes, n = 14) {
+  const out = Array(closes.length).fill(null);
+  if (closes.length < n + 1) return out;
+  let gains = 0, losses = 0;
+  for (let i = 1; i <= n; i++) {
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) gains += d; else losses -= d;
+  }
+  let avgGain = gains / n, avgLoss = losses / n;
+  out[n] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  for (let i = n + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (n - 1) + Math.max(d, 0)) / n;
+    avgLoss = (avgLoss * (n - 1) + Math.max(-d, 0)) / n;
+    out[i] = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+  return out;
+}
+
+// ============ チャート描画 ============
+// 共通：チャートタイプ切り替えUIを含むラッパー
 function buildDetailChart(ticker) {
   const history = priceHistory[ticker];
-  if (!history || history.length < 2) return '<div class="pg-empty">データ蓄積中...</div>';
-  const prices = history.map(h => h.price);
-  const times  = history.map(h => h.t);
-  const min = Math.min(...prices) * 0.997;
-  const max = Math.max(...prices) * 1.003;
-  const range = max - min || 1;
-  const W = 600, H = 100;
-  const toX = (i) => (i / (history.length - 1)) * W;
-  const toY = (v) => H - ((v - min) / range) * H;
-  const pts  = history.map((h, i) => `${toX(i).toFixed(1)},${toY(h.price).toFixed(1)}`).join(' ');
-  const isUp = prices[prices.length - 1] >= prices[0];
-  const color = isUp ? 'var(--green)' : 'var(--red)';
-  // 売買マーカー
+  if (!history || history.length < 2) return '<div class="pg-empty">データ蓄積中...（株式市場が開いている間に自動で蓄積されます）</div>';
+  const inner = buildChartInner(ticker, currentChartType);
+  const types = [
+    { id: 'line',   label: '折れ線' },
+    { id: 'candle', label: 'ローソク' },
+    { id: 'ma',     label: '移動平均' },
+    { id: 'bb',     label: 'ボリンジャー' },
+    { id: 'rsi',    label: 'RSI' },
+    { id: 'volume', label: '出来高' },
+  ];
+  const btns = types.map(t =>
+    `<button class="chart-tab-btn${currentChartType === t.id ? ' active' : ''}" onclick="switchChartType('${t.id}')">${t.label}</button>`
+  ).join('');
+  const desc = getChartDescription(currentChartType);
+  return `
+    <div class="chart-tabs">${btns}</div>
+    <div id="chartInner" class="chart-inner">${inner}</div>
+    <div class="chart-desc" id="chartDesc">${desc}</div>
+  `;
+}
+
+window.switchChartType = function(type) {
+  currentChartType = type;
+  if (!currentModalStock) return;
+  document.getElementById('modalChart').innerHTML = buildDetailChart(currentModalStock.ticker);
+};
+
+function getChartDescription(type) {
+  const map = {
+    line: `<strong>📈 折れ線チャート</strong> — 株価の動きをシンプルな線で表したもの。値上がりなら<span style="color:var(--green)">緑</span>、値下がりなら<span style="color:var(--red)">赤</span>になる。まず最初に見るチャート。`,
+    candle: `<strong>🕯 ローソク足</strong> — 1本の棒で「始値・高値・安値・終値」の4つがわかる。<br>
+      <span style="color:var(--green)">■ 緑（陽線）</span>: 値上がりした期間。<span style="color:var(--red)">■ 赤（陰線）</span>: 値下がりした期間。<br>
+      棒から出ている細い線（ひげ）は、その期間の最高値・最安値を示す。`,
+    ma: `<strong>〰 移動平均線(MA)</strong> — 過去N本のローソクの終値の平均を線でつないだもの。<br>
+      <span style="color:#f9c74f">■ 黄(SMA5)</span>: 短期の動き。価格に近い。 <span style="color:#4ecdc4">■ 青(SMA20)</span>: 中期トレンド。<br>
+      価格線が移動平均線を上に突き抜けたら「買いシグナル」、下に突き抜けたら「売りシグナル」とよく言われる。`,
+    bb: `<strong>📊 ボリンジャーバンド</strong> — 移動平均線(中央線)の上下に「±2σ(シグマ)」の幅の帯を描いたもの。<br>
+      約95%の確率で株価はこのバンド内に収まる。<br>
+      株価がバンドの上限に近いと「買われ過ぎかも」、下限に近いと「売られ過ぎかも」と読む。`,
+    rsi: `<strong>💡 RSI（相対力指数）</strong> — 0〜100の数値で「買われ過ぎ・売られ過ぎ」を示すもの。<br>
+      <span style="color:var(--red)">70以上 → 買われ過ぎ（売りを検討）</span><br>
+      <span style="color:var(--green)">30以下 → 売られ過ぎ（買いを検討）</span><br>
+      ただし強いトレンドのときは無視されることもある。一つの参考指標として使おう。`,
+    volume: `<strong>📦 出来高（ボリューム）</strong> — どれだけ多く取引されたかを棒グラフで示す。<br>
+      株価が大きく動くとき、出来高も増えることが多い。<br>
+      出来高が少ないときの値動きは「信頼性が低い」とも言われる。価格と合わせて確認しよう。`,
+  };
+  return map[type] || '';
+}
+
+function buildChartInner(ticker, type) {
+  const history = priceHistory[ticker] || [];
+  const candles = getCandlesForChart(ticker);
+  if (history.length < 2) return '<div class="pg-empty">データ蓄積中...</div>';
+
+  if (type === 'line')   return buildLineChart(ticker, history);
+  if (type === 'candle') return buildCandleChart(candles);
+  if (type === 'ma')     return buildMAChart(candles, history);
+  if (type === 'bb')     return buildBBChart(candles, history);
+  if (type === 'rsi')    return buildRSIChart(candles, history);
+  if (type === 'volume') return buildVolumeChart(candles, history);
+  return buildLineChart(ticker, history);
+}
+
+// priceHistoryからダミーcandles生成（candleHistoryが不足の場合のフォールバック）
+function getCandlesForChart(ticker) {
+  const hist = candleHistory[ticker] || [];
+  if (hist.length >= 5) return hist;
+  // fallback: priceHistoryからOHLC近似
+  const ph = priceHistory[ticker] || [];
+  const size = Math.max(1, Math.floor(ph.length / 40));
+  const out = [];
+  for (let i = 0; i < ph.length; i += size) {
+    const chunk = ph.slice(i, i + size);
+    const prices = chunk.map(h => h.price);
+    out.push({
+      barStart: chunk[0].t,
+      open: prices[0], close: prices[prices.length - 1],
+      high: Math.max(...prices), low: Math.min(...prices),
+      vol: chunk.length,
+    });
+  }
+  return out;
+}
+
+const W = 580, H = 130;
+function svgWrap(inner, h = H) {
+  return `<svg class="detail-chart" viewBox="0 0 ${W} ${h}" preserveAspectRatio="none">${inner}</svg>`;
+}
+function tradeMarkers(ticker, toX, toY, history) {
   const trades = state.journal.filter(e => e.ticker === ticker);
-  const markers = trades.map(e => {
-    // 一番近いhistoryインデックスを探す
+  return trades.map(e => {
     let closest = 0, bestDiff = Infinity;
     history.forEach((h, i) => { const d = Math.abs(h.t - e.simMinute); if (d < bestDiff) { bestDiff = d; closest = i; } });
     const cx = toX(closest).toFixed(1);
@@ -187,10 +341,160 @@ function buildDetailChart(ticker) {
     return `<circle cx="${cx}" cy="${cy}" r="5" fill="${fill}" opacity="0.9"/>
       <text x="${cx}" y="${(parseFloat(cy) - 8).toFixed(1)}" text-anchor="middle" fill="${fill}" font-size="9" font-family="sans-serif">${e.action === 'buy' ? '買' : '売'}</text>`;
   }).join('');
-  return `<svg class="detail-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+}
+
+function buildLineChart(ticker, history) {
+  const prices = history.map(h => h.price);
+  const min = Math.min(...prices) * 0.997, max = Math.max(...prices) * 1.003;
+  const range = max - min || 1;
+  const toX = i => (i / (history.length - 1)) * W;
+  const toY = v => H - ((v - min) / range) * H;
+  const pts = history.map((h, i) => `${toX(i).toFixed(1)},${toY(h.price).toFixed(1)}`).join(' ');
+  const isUp = prices[prices.length - 1] >= prices[0];
+  const color = isUp ? 'var(--green)' : 'var(--red)';
+  const fillId = 'lf' + ticker;
+  const lastX = toX(history.length - 1).toFixed(1);
+  return svgWrap(`
+    <defs><linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${color}" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="0,${H} ${pts} ${lastX},${H}" fill="url(#${fillId})"/>
     <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
-    ${markers}
-  </svg>`;
+    ${tradeMarkers(ticker, toX, toY, history)}
+  `);
+}
+
+function buildCandleChart(candles) {
+  if (candles.length < 2) return '<div class="pg-empty">ローソク足データ蓄積中...</div>';
+  const prices = candles.flatMap(c => [c.high, c.low]);
+  const min = Math.min(...prices) * 0.997, max = Math.max(...prices) * 1.003;
+  const range = max - min || 1;
+  const toY = v => H - ((v - min) / range) * H;
+  const bw = Math.max(2, (W / candles.length) * 0.6);
+  const paths = candles.map((c, i) => {
+    const x = (i / (candles.length - 1)) * W;
+    const isUp = c.close >= c.open;
+    const color = isUp ? 'var(--green)' : 'var(--red)';
+    const y1 = toY(Math.max(c.open, c.close)), y2 = toY(Math.min(c.open, c.close));
+    const bodyH = Math.max(1, y2 - y1);
+    return `<line x1="${x.toFixed(1)}" y1="${toY(c.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${toY(c.low).toFixed(1)}" stroke="${color}" stroke-width="1" vector-effect="non-scaling-stroke"/>
+      <rect x="${(x - bw/2).toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${color}" opacity="0.85"/>`;
+  }).join('');
+  return svgWrap(paths);
+}
+
+function buildMAChart(candles, history) {
+  const closes = candles.map(c => c.close);
+  const sma5  = calcSMA(closes, 5);
+  const sma20 = calcSMA(closes, 20);
+  const allPrices = [...closes, ...sma5.filter(v => v), ...sma20.filter(v => v)];
+  const min = Math.min(...allPrices) * 0.997, max = Math.max(...allPrices) * 1.003;
+  const range = max - min || 1;
+  const toX = i => (i / (candles.length - 1)) * W;
+  const toY = v => H - ((v - min) / range) * H;
+  // 価格線
+  const pricePts = candles.map((c, i) => `${toX(i).toFixed(1)},${toY(c.close).toFixed(1)}`).join(' ');
+  const buildLine = (arr, color, width = 1.5) => {
+    const seg = []; let cur = '';
+    arr.forEach((v, i) => {
+      if (v === null) { if (cur) { seg.push(`<polyline points="${cur.trim()}" fill="none" stroke="${color}" stroke-width="${width}" vector-effect="non-scaling-stroke"/>`); cur = ''; } }
+      else cur += ` ${toX(i).toFixed(1)},${toY(v).toFixed(1)}`;
+    });
+    if (cur) seg.push(`<polyline points="${cur.trim()}" fill="none" stroke="${color}" stroke-width="${width}" vector-effect="non-scaling-stroke"/>`);
+    return seg.join('');
+  };
+  return svgWrap(`
+    <polyline points="${pricePts}" fill="none" stroke="var(--ink-dim)" stroke-width="1" opacity="0.5" vector-effect="non-scaling-stroke"/>
+    ${buildLine(sma5, '#f9c74f', 1.8)}
+    ${buildLine(sma20, '#4ecdc4', 1.8)}
+    <text x="4" y="12" fill="#f9c74f" font-size="9" font-family="sans-serif">SMA5</text>
+    <text x="38" y="12" fill="#4ecdc4" font-size="9" font-family="sans-serif">SMA20</text>
+  `);
+}
+
+function buildBBChart(candles, history) {
+  const closes = candles.map(c => c.close);
+  const bb = calcBB(closes, 20, 2);
+  const validBB = bb.filter(b => b.upper !== null);
+  if (validBB.length < 3) return '<div class="pg-empty">ボリンジャーバンドはデータ20本以上で表示されます</div>';
+  const allPrices = [...closes, ...validBB.map(b => b.upper), ...validBB.map(b => b.lower)];
+  const min = Math.min(...allPrices) * 0.997, max = Math.max(...allPrices) * 1.003;
+  const range = max - min || 1;
+  const toX = i => (i / (candles.length - 1)) * W;
+  const toY = v => H - ((v - min) / range) * H;
+  const buildPts = arr => arr.map((v, i) => v === null ? null : `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`);
+  const filterPts = pts => pts.filter(p => p !== null).join(' ');
+  const upperPts = filterPts(buildPts(bb.map(b => b.upper)));
+  const lowerPts = filterPts(buildPts(bb.map(b => b.lower)));
+  const midPts   = filterPts(buildPts(bb.map(b => b.mid)));
+  const pricePts = filterPts(candles.map((c, i) => `${toX(i).toFixed(1)},${toY(c.close).toFixed(1)}`));
+  // バンド塗り
+  const bandPoly = upperPts + ' ' + lowerPts.split(' ').reverse().join(' ');
+  return svgWrap(`
+    <polygon points="${bandPoly}" fill="var(--green)" opacity="0.08"/>
+    <polyline points="${upperPts}" fill="none" stroke="var(--green)" stroke-width="1" stroke-dasharray="3,2" vector-effect="non-scaling-stroke"/>
+    <polyline points="${lowerPts}" fill="none" stroke="var(--red)" stroke-width="1" stroke-dasharray="3,2" vector-effect="non-scaling-stroke"/>
+    <polyline points="${midPts}" fill="none" stroke="#f9c74f" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+    <polyline points="${pricePts}" fill="none" stroke="var(--ink)" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    <text x="4" y="12" fill="#f9c74f" font-size="9" font-family="sans-serif">中心線</text>
+    <text x="36" y="12" fill="var(--green)" font-size="9" font-family="sans-serif">+2σ</text>
+    <text x="56" y="12" fill="var(--red)" font-size="9" font-family="sans-serif">-2σ</text>
+  `);
+}
+
+function buildRSIChart(candles, history) {
+  const closes = candles.map(c => c.close);
+  const rsi = calcRSI(closes, 14);
+  const validRsi = rsi.filter(v => v !== null);
+  if (validRsi.length < 3) return '<div class="pg-empty">RSIはデータ15本以上で表示されます</div>';
+  const RSI_H = 80;
+  const toX = i => (i / (rsi.length - 1)) * W;
+  const toY = v => RSI_H - (v / 100) * RSI_H;
+  const pts = rsi.map((v, i) => v === null ? null : `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).filter(Boolean).join(' ');
+  const y70 = toY(70).toFixed(1), y30 = toY(30).toFixed(1), y50 = toY(50).toFixed(1);
+  const lastVal = validRsi[validRsi.length - 1];
+  const rsiColor = lastVal >= 70 ? 'var(--red)' : lastVal <= 30 ? 'var(--green)' : 'var(--ink)';
+  return svgWrap(`
+    <rect x="0" y="0" width="${W}" height="${y70}" fill="var(--red)" opacity="0.06"/>
+    <rect x="0" y="${y30}" width="${W}" height="${RSI_H - parseFloat(y30)}" fill="var(--green)" opacity="0.06"/>
+    <line x1="0" y1="${y70}" x2="${W}" y2="${y70}" stroke="var(--red)" stroke-width="0.8" stroke-dasharray="3,3" vector-effect="non-scaling-stroke"/>
+    <line x1="0" y1="${y50}" x2="${W}" y2="${y50}" stroke="var(--border)" stroke-width="0.8" stroke-dasharray="2,4" vector-effect="non-scaling-stroke"/>
+    <line x1="0" y1="${y30}" x2="${W}" y2="${y30}" stroke="var(--green)" stroke-width="0.8" stroke-dasharray="3,3" vector-effect="non-scaling-stroke"/>
+    <polyline points="${pts}" fill="none" stroke="${rsiColor}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    <text x="4" y="10" fill="var(--red)" font-size="8" font-family="sans-serif">70 買われ過ぎ</text>
+    <text x="4" y="${parseFloat(y30) + 10}" fill="var(--green)" font-size="8" font-family="sans-serif">30 売られ過ぎ</text>
+    <text x="${W - 30}" y="${toY(lastVal) - 5}" fill="${rsiColor}" font-size="10" font-family="JetBrains Mono,monospace">${lastVal.toFixed(0)}</text>
+  `, RSI_H);
+}
+
+function buildVolumeChart(candles, history) {
+  if (candles.length < 2) return '<div class="pg-empty">出来高データ蓄積中...</div>';
+  const VOL_H = 60;
+  const maxVol = Math.max(...candles.map(c => c.vol), 1);
+  const bw = Math.max(1, (W / candles.length) * 0.7);
+  // 上部: 価格折れ線
+  const closes = candles.map(c => c.close);
+  const pMin = Math.min(...closes) * 0.997, pMax = Math.max(...closes) * 1.003;
+  const pRange = pMax - pMin || 1;
+  const topH = H - VOL_H - 10;
+  const toX = i => (i / (candles.length - 1)) * W;
+  const toPy = v => topH - ((v - pMin) / pRange) * topH;
+  const toVy = v => H - (v / maxVol) * VOL_H;
+  const pricePts = candles.map((c, i) => `${toX(i).toFixed(1)},${toPy(c.close).toFixed(1)}`).join(' ');
+  const bars = candles.map((c, i) => {
+    const x = toX(i);
+    const barH = (c.vol / maxVol) * VOL_H;
+    const color = c.close >= c.open ? 'var(--green)' : 'var(--red)';
+    return `<rect x="${(x - bw/2).toFixed(1)}" y="${(H - barH).toFixed(1)}" width="${bw.toFixed(1)}" height="${barH.toFixed(1)}" fill="${color}" opacity="0.7"/>`;
+  }).join('');
+  return svgWrap(`
+    <polyline points="${pricePts}" fill="none" stroke="var(--ink)" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+    <line x1="0" y1="${topH + 5}" x2="${W}" y2="${topH + 5}" stroke="var(--border)" stroke-width="0.8"/>
+    ${bars}
+    <text x="4" y="12" fill="var(--ink-dim)" font-size="8" font-family="sans-serif">価格</text>
+    <text x="4" y="${topH + 16}" fill="var(--ink-dim)" font-size="8" font-family="sans-serif">出来高</text>
+  `);
 }
 
 // ② 保有銘柄別損益バーチャート（水平）
@@ -834,15 +1138,18 @@ const TUTORIAL_STEPS = [
   <li><strong style="color:var(--yellow)">「なぜ買う？」を必ず書こう</strong> ← これが一番大事！</li>
   <li>「買う」ボタンを押して購入完了</li>
 </ol>
-<p style="margin-top:12px; color:var(--ink-dim); font-size:13px">※ 手持ちの現金以上は買えません。</p>`,
+<p style="margin-top:12px; color:var(--ink-dim); font-size:13px">
+  ⚠️ 株を買うと<strong>手数料（売買金額の0.45%）</strong>がかかります。<br>
+  売るときは利益に<strong>税金（約20%）</strong>もかかります。現実でもこれが引かれます。
+</p>`,
   },
   {
     title: '💰 資産と損益の確認',
     body: `<ul class="tut-list">
   <li>ページ上部の<strong>「資産合計」</strong>でリアルタイム確認</li>
-  <li><strong>「保有銘柄」テーブル</strong>で各株の含み損益を確認</li>
+  <li><strong>「保有銘柄」テーブル</strong>で各株の含み損益・保有日数を確認</li>
   <li><span style="color:var(--green)">緑 = 含み益（プラス）</span> / <span style="color:var(--red)">赤 = 含み損（マイナス）</span></li>
-  <li>グラフ（スパークライン）で値動きの波形を確認できる</li>
+  <li>右側のスパークライン（折れ線）で短期の値動きが見られる</li>
 </ul>`,
   },
   {
@@ -854,6 +1161,83 @@ const TUTORIAL_STEPS = [
   <li>「売る」ボタンで売却完了</li>
 </ol>
 <p style="margin-top:12px">売買の記録は<strong>「トレード日記」</strong>に残ります。振り返ることで自分の投資スタイルが見えてきます。</p>`,
+  },
+  {
+    title: '🕯 チャートの種類① ローソク足',
+    body: `<p>銘柄カードをタップすると詳細チャートが見られます。上部のタブで種類を切り替えられます。</p>
+<p><strong>ローソク足</strong>は1本の棒で4つの情報をまとめたものです：</p>
+<table class="tut-table">
+  <tr><td>始値</td><td>その時間帯が始まったときの株価</td></tr>
+  <tr><td>終値</td><td>その時間帯が終わったときの株価</td></tr>
+  <tr><td>高値</td><td>その時間帯の最高値</td></tr>
+  <tr><td>安値</td><td>その時間帯の最安値</td></tr>
+</table>
+<p style="margin-top:10px">
+  <span style="color:var(--green)">■ 緑(陽線)</span> = 終値 &gt; 始値（値上がり）<br>
+  <span style="color:var(--red)">■ 赤(陰線)</span> = 終値 &lt; 始値（値下がり）<br>
+  棒からはみ出た細い線を<strong>「ひげ」</strong>と呼び、その期間の高値・安値を示します。
+</p>`,
+  },
+  {
+    title: '〰 チャートの種類② 移動平均線',
+    body: `<p><strong>移動平均線(MA)</strong>は「過去N本のローソクの終値の平均を線でつないだもの」です。</p>
+<table class="tut-table">
+  <tr><td style="color:#f9c74f">■ 黄色(SMA5)</td><td>直近5本の平均。価格の近くを動く</td></tr>
+  <tr><td style="color:#4ecdc4">■ 青(SMA20)</td><td>直近20本の平均。中期的な流れを示す</td></tr>
+</table>
+<p style="margin-top:10px">読み方のポイント：</p>
+<ul class="tut-list">
+  <li>価格が移動平均線より<strong style="color:var(--green)">上</strong> → 上昇トレンドの可能性</li>
+  <li>価格が移動平均線より<strong style="color:var(--red)">下</strong> → 下降トレンドの可能性</li>
+  <li>短期線が長期線を<strong>上に突き抜けたら買いサイン(ゴールデンクロス)</strong></li>
+  <li>短期線が長期線を<strong>下に突き抜けたら売りサイン(デッドクロス)</strong></li>
+</ul>`,
+  },
+  {
+    title: '📊 チャートの種類③ ボリンジャーバンド',
+    body: `<p><strong>ボリンジャーバンド</strong>は移動平均線の上下に「どれだけ株価が散らばっているか(σ=シグマ)」を示す帯を描いたものです。</p>
+<p>統計的に、約95%の確率で株価はこのバンドの内側に収まります。</p>
+<ul class="tut-list">
+  <li>株価がバンドの<strong style="color:var(--green)">上限に近い</strong> → 「買われ過ぎかも？」と疑うサイン</li>
+  <li>株価がバンドの<strong style="color:var(--red)">下限に近い</strong> → 「売られ過ぎかも？」と疑うサイン</li>
+  <li>バンドが<strong>広がる</strong> → 値動きが大きくなっている（ボラティリティ上昇）</li>
+  <li>バンドが<strong>狭くなる</strong> → 値動きが小さくなっている（次の大きな動きの前兆?）</li>
+</ul>`,
+  },
+  {
+    title: '💡 チャートの種類④ RSI',
+    body: `<p><strong>RSI（相対力指数）</strong>は0〜100の数字で「今の株価は買われ過ぎ？売られ過ぎ？」を示す指標です。</p>
+<table class="tut-table">
+  <tr><td style="color:var(--red)">70以上</td><td>買われ過ぎゾーン。値下がりに注意</td></tr>
+  <tr><td>50前後</td><td>中立。どちらでもない状態</td></tr>
+  <tr><td style="color:var(--green)">30以下</td><td>売られ過ぎゾーン。値上がりに注意</td></tr>
+</table>
+<p style="margin-top:10px; font-size:12px; color:var(--ink-dim)">
+  ⚠️ 注意: RSIだけを見て売買するのは危険！強いトレンドのときは70超え・30割れが長く続くこともあります。他のチャートも合わせて確認しましょう。
+</p>`,
+  },
+  {
+    title: '📦 チャートの種類⑤ 出来高',
+    body: `<p><strong>出来高（ボリューム）</strong>は「どれだけ多く取引が行われたか」を棒グラフで示したものです。</p>
+<ul class="tut-list">
+  <li>株価が大きく動くとき、<strong>出来高も一緒に増えることが多い</strong></li>
+  <li>価格が上がっていても出来高が少ないなら、<strong>上昇の信頼性が低い</strong>かもしれない</li>
+  <li>逆に価格の動きに出来高が伴っているなら、<strong>トレンドが強い</strong>サイン</li>
+</ul>
+<p style="margin-top:10px">チャートの上部に価格の動き、下部に出来高の棒グラフが表示されます。<br>
+<span style="color:var(--green)">緑</span> = 値上がりした期間、<span style="color:var(--red)">赤</span> = 値下がりした期間の出来高です。</p>`,
+  },
+  {
+    title: '🏆 ミッションに挑戦しよう',
+    body: `<p>右上の<strong>「🏆 ミッション」</strong>ボタンで達成目標の一覧が見られます。</p>
+<p>チュートリアルで学んだことを実際に試して、ミッションを達成しよう！</p>
+<ul class="tut-list">
+  <li>📌 まず「はじめての買い」から挑戦</li>
+  <li>📌 「なぜ買う？」を入力してから購入してみよう</li>
+  <li>📌 3銘柄以上に分散してみよう</li>
+  <li>📌 ニュースイベントが来たらチャートを確認しよう</li>
+</ul>
+<p style="margin-top:12px; color:var(--ink-dim); font-size:12px">保護者の方: 「📋 保護者レポート」ボタンで子どものトレード記録・理由・達成ミッションを一覧できます。</p>`,
   },
 ];
 
