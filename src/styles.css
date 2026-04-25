@@ -285,6 +285,16 @@ header {
 .mission-desc { font-size: 12px; color: var(--ink-dim); }
 
 /* ============ テクニカルチャート ============ */
+.chart-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+.chart-timeframes { display: flex; flex-wrap: wrap; gap: 4px; }
+.chart-tf-btn {
+  font-size: 10.5px; padding: 2px 8px; border-radius: 999px;
+  background: transparent; border: 1px solid var(--border); color: var(--ink-dim);
+  cursor: pointer; transition: all 0.15s;
+}
+.chart-tf-btn:hover { color: var(--ink); border-color: var(--ink-dim); }
+.chart-tf-btn.active { background: var(--yellow); border-color: var(--yellow); color: #111; font-weight: 700; }
+.chart-timeframe-note { font-size: 10px; color: var(--ink-dim); white-space: nowrap; }
 .chart-tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
 .chart-tab-btn {
   font-size: 11px; padding: 3px 10px; border-radius: 4px;
@@ -300,6 +310,11 @@ header {
   font-size: 11.5px; line-height: 1.7; color: var(--ink);
 }
 .chart-desc strong { color: var(--yellow); }
+
+@media (max-width: 640px) {
+  .chart-toolbar { flex-direction: column; align-items: flex-start; }
+  .chart-timeframe-note { white-space: normal; }
+}
 
 /* ============ 銘柄情報タブ ============ */
 .modal-info { padding: 16px 0; }

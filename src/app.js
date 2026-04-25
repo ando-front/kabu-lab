@@ -53,7 +53,8 @@ let priceHistory = {};      // {ticker: [{t, price}]} - スパークライン用
 let candleHistory = {};     // {ticker: [{t, open, high, low, close, vol}]} - テクニカル用
 let currentModalStock = null;
 let currentTab = 'buy';
-let currentChartType = 'line'; // line | candle | ma | bb | rsi | volume
+let currentChartType = 'line'; // line | candle_ma | bb | rsi | volume
+let currentChartTf = '15m';    // 15m | 1h | 4h | 1d
 let simSpeed = 1;
 let simTickTimer = null;
 let lastPrices = {};
@@ -243,19 +244,31 @@ function buildDetailChart(ticker) {
   const history = priceHistory[ticker];
   if (!history || history.length < 2) return '<div class="pg-empty">データ蓄積中...（株式市場が開いている間に自動で蓄積されます）</div>';
   const inner = buildChartInner(ticker, currentChartType);
+  const tfList = [
+    { id: '15m', label: '15分足' },
+    { id: '1h',  label: '1時間足' },
+    { id: '4h',  label: '4時間足' },
+    { id: '1d',  label: '日足' },
+  ];
   const types = [
     { id: 'line',   label: '折れ線' },
-    { id: 'candle', label: 'ローソク' },
-    { id: 'ma',     label: '移動平均' },
+    { id: 'candle_ma', label: 'ローソク+MA' },
     { id: 'bb',     label: 'ボリンジャー' },
     { id: 'rsi',    label: 'RSI' },
     { id: 'volume', label: '出来高' },
   ];
+  const tfBtns = tfList.map(t =>
+    `<button class="chart-tf-btn${currentChartTf === t.id ? ' active' : ''}" onclick="switchChartTf('${t.id}')">${t.label}</button>`
+  ).join('');
   const btns = types.map(t =>
     `<button class="chart-tab-btn${currentChartType === t.id ? ' active' : ''}" onclick="switchChartType('${t.id}')">${t.label}</button>`
   ).join('');
   const desc = getChartDescription(currentChartType);
   return `
+    <div class="chart-toolbar">
+      <div class="chart-timeframes">${tfBtns}</div>
+      <div class="chart-timeframe-note">時間軸を切り替えると同じ銘柄でも見え方が変わる</div>
+    </div>
     <div class="chart-tabs">${btns}</div>
     <div id="chartInner" class="chart-inner">${inner}</div>
     <div class="chart-desc" id="chartDesc">${desc}</div>
@@ -268,15 +281,18 @@ window.switchChartType = function(type) {
   document.getElementById('modalChart').innerHTML = buildDetailChart(currentModalStock.ticker);
 };
 
+window.switchChartTf = function(tf) {
+  currentChartTf = tf;
+  if (!currentModalStock) return;
+  document.getElementById('modalChart').innerHTML = buildDetailChart(currentModalStock.ticker);
+};
+
 function getChartDescription(type) {
   const map = {
     line: `<strong>📈 折れ線チャート</strong> — 株価の動きをシンプルな線で表したもの。値上がりなら<span style="color:var(--green)">緑</span>、値下がりなら<span style="color:var(--red)">赤</span>になる。まず最初に見るチャート。`,
-    candle: `<strong>🕯 ローソク足</strong> — 1本の棒で「始値・高値・安値・終値」の4つがわかる。<br>
-      <span style="color:var(--green)">■ 緑（陽線）</span>: 値上がりした期間。<span style="color:var(--red)">■ 赤（陰線）</span>: 値下がりした期間。<br>
-      棒から出ている細い線（ひげ）は、その期間の最高値・最安値を示す。`,
-    ma: `<strong>〰 移動平均線(MA)</strong> — 過去N本のローソクの終値の平均を線でつないだもの。<br>
-      <span style="color:#f9c74f">■ 黄(SMA5)</span>: 短期の動き。価格に近い。 <span style="color:#4ecdc4">■ 青(SMA20)</span>: 中期トレンド。<br>
-      価格線が移動平均線を上に突き抜けたら「買いシグナル」、下に突き抜けたら「売りシグナル」とよく言われる。`,
+    candle_ma: `<strong>🕯＋〰 ローソク足 + 移動平均線</strong> — 1つの画面で値動きとトレンドを同時に確認。<br>
+      <span style="color:var(--green)">■ 緑（陽線）</span>/<span style="color:var(--red)">■ 赤（陰線）</span>で上げ下げ、<span style="color:#f9c74f">黄(SMA5)</span>と<span style="color:#4ecdc4">青(SMA20)</span>で流れを見る。<br>
+      まず時間軸を選んでから読むと判断しやすい。`,
     bb: `<strong>📊 ボリンジャーバンド</strong> — 移動平均線(中央線)の上下に「±2σ(シグマ)」の幅の帯を描いたもの。<br>
       約95%の確率で株価はこのバンド内に収まる。<br>
       株価がバンドの上限に近いと「買われ過ぎかも」、下限に近いと「売られ過ぎかも」と読む。`,
@@ -293,22 +309,52 @@ function getChartDescription(type) {
 
 function buildChartInner(ticker, type) {
   const history = priceHistory[ticker] || [];
-  const candles = getCandlesForChart(ticker);
+  const candles = getCandlesForChart(ticker, currentChartTf);
   if (history.length < 2) return '<div class="pg-empty">データ蓄積中...</div>';
 
-  if (type === 'line')   return buildLineChart(ticker, history);
-  if (type === 'candle') return buildCandleChart(candles);
-  if (type === 'ma')     return buildMAChart(candles, history);
+  if (type === 'line')      return buildLineChartFromCandles(candles);
+  if (type === 'candle_ma') return buildCandleMAChart(candles);
   if (type === 'bb')     return buildBBChart(candles, history);
   if (type === 'rsi')    return buildRSIChart(candles, history);
   if (type === 'volume') return buildVolumeChart(candles, history);
-  return buildLineChart(ticker, history);
+  return buildLineChartFromCandles(candles);
+}
+
+function aggregateCandles(src, intervalMin) {
+  if (!src || src.length === 0) return [];
+  const sorted = [...src].sort((a, b) => a.barStart - b.barStart);
+  const out = [];
+  let cur = null;
+  for (const c of sorted) {
+    const gStart = c.barStart - (c.barStart % intervalMin);
+    if (!cur || cur.barStart !== gStart) {
+      if (cur) out.push(cur);
+      cur = { barStart: gStart, open: c.open, high: c.high, low: c.low, close: c.close, vol: c.vol || 0 };
+    } else {
+      cur.high = Math.max(cur.high, c.high);
+      cur.low = Math.min(cur.low, c.low);
+      cur.close = c.close;
+      cur.vol += c.vol || 0;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
 }
 
 // priceHistoryからダミーcandles生成（candleHistoryが不足の場合のフォールバック）
-function getCandlesForChart(ticker) {
-  const hist = candleHistory[ticker] || [];
-  if (hist.length >= 5) return hist;
+function getCandlesForChart(ticker, tf = '15m') {
+  const hist = [...(candleHistory[ticker] || [])];
+  const live = candleBuffer[ticker];
+  if (live) hist.push({ ...live });
+
+  const tfMap = { '15m': 15, '1h': 60, '4h': 240, '1d': 1440 };
+  const intervalMin = tfMap[tf] || 15;
+
+  if (hist.length >= 5) {
+    const agged = aggregateCandles(hist, intervalMin);
+    return agged.slice(-80);
+  }
+
   // fallback: priceHistoryからOHLC近似
   const ph = priceHistory[ticker] || [];
   const size = Math.max(1, Math.floor(ph.length / 40));
@@ -323,7 +369,8 @@ function getCandlesForChart(ticker) {
       vol: chunk.length,
     });
   }
-  return out;
+  const agged = aggregateCandles(out, intervalMin);
+  return agged.slice(-80);
 }
 
 const W = 580, H = 130;
@@ -365,15 +412,45 @@ function buildLineChart(ticker, history) {
   `);
 }
 
-function buildCandleChart(candles) {
+function buildLineChartFromCandles(candles) {
+  if (!candles || candles.length < 2) return '<div class="pg-empty">折れ線データ蓄積中...</div>';
+  const closes = candles.map(c => c.close);
+  const min = Math.min(...closes) * 0.997;
+  const max = Math.max(...closes) * 1.003;
+  const range = max - min || 1;
+  const toX = i => (i / (candles.length - 1)) * W;
+  const toY = v => H - ((v - min) / range) * H;
+  const pts = closes.map((v, i) => `${toX(i).toFixed(1)},${toY(v).toFixed(1)}`).join(' ');
+  const isUp = closes[closes.length - 1] >= closes[0];
+  const color = isUp ? 'var(--green)' : 'var(--red)';
+  const fillId = 'lf2';
+  const lastX = toX(candles.length - 1).toFixed(1);
+  return svgWrap(`
+    <defs><linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="${color}" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+    </linearGradient></defs>
+    <polygon points="0,${H} ${pts} ${lastX},${H}" fill="url(#${fillId})"/>
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+  `);
+}
+
+function buildCandleMAChart(candles) {
   if (candles.length < 2) return '<div class="pg-empty">ローソク足データ蓄積中...</div>';
   const prices = candles.flatMap(c => [c.high, c.low]);
-  const min = Math.min(...prices) * 0.997, max = Math.max(...prices) * 1.003;
+  const closes = candles.map(c => c.close);
+  const sma5  = calcSMA(closes, 5);
+  const sma20 = calcSMA(closes, 20);
+  const maVals = [...sma5.filter(v => v != null), ...sma20.filter(v => v != null)];
+  const allPrices = maVals.length ? prices.concat(maVals) : prices;
+  const min = Math.min(...allPrices) * 0.997;
+  const max = Math.max(...allPrices) * 1.003;
   const range = max - min || 1;
+  const toX = i => (i / (candles.length - 1)) * W;
   const toY = v => H - ((v - min) / range) * H;
   const bw = Math.max(2, (W / candles.length) * 0.6);
   const paths = candles.map((c, i) => {
-    const x = (i / (candles.length - 1)) * W;
+    const x = toX(i);
     const isUp = c.close >= c.open;
     const color = isUp ? 'var(--green)' : 'var(--red)';
     const y1 = toY(Math.max(c.open, c.close)), y2 = toY(Math.min(c.open, c.close));
@@ -381,20 +458,7 @@ function buildCandleChart(candles) {
     return `<line x1="${x.toFixed(1)}" y1="${toY(c.high).toFixed(1)}" x2="${x.toFixed(1)}" y2="${toY(c.low).toFixed(1)}" stroke="${color}" stroke-width="1" vector-effect="non-scaling-stroke"/>
       <rect x="${(x - bw/2).toFixed(1)}" y="${y1.toFixed(1)}" width="${bw.toFixed(1)}" height="${bodyH.toFixed(1)}" fill="${color}" opacity="0.85"/>`;
   }).join('');
-  return svgWrap(paths);
-}
 
-function buildMAChart(candles, history) {
-  const closes = candles.map(c => c.close);
-  const sma5  = calcSMA(closes, 5);
-  const sma20 = calcSMA(closes, 20);
-  const allPrices = [...closes, ...sma5.filter(v => v), ...sma20.filter(v => v)];
-  const min = Math.min(...allPrices) * 0.997, max = Math.max(...allPrices) * 1.003;
-  const range = max - min || 1;
-  const toX = i => (i / (candles.length - 1)) * W;
-  const toY = v => H - ((v - min) / range) * H;
-  // 価格線
-  const pricePts = candles.map((c, i) => `${toX(i).toFixed(1)},${toY(c.close).toFixed(1)}`).join(' ');
   const buildLine = (arr, color, width = 1.5) => {
     const seg = []; let cur = '';
     arr.forEach((v, i) => {
@@ -404,8 +468,9 @@ function buildMAChart(candles, history) {
     if (cur) seg.push(`<polyline points="${cur.trim()}" fill="none" stroke="${color}" stroke-width="${width}" vector-effect="non-scaling-stroke"/>`);
     return seg.join('');
   };
+
   return svgWrap(`
-    <polyline points="${pricePts}" fill="none" stroke="var(--ink-dim)" stroke-width="1" opacity="0.5" vector-effect="non-scaling-stroke"/>
+    ${paths}
     ${buildLine(sma5, '#f9c74f', 1.8)}
     ${buildLine(sma20, '#4ecdc4', 1.8)}
     <text x="4" y="12" fill="#f9c74f" font-size="9" font-family="sans-serif">SMA5</text>
@@ -1164,7 +1229,14 @@ const TUTORIAL_STEPS = [
   },
   {
     title: '🕯 チャートの種類① ローソク足',
-    body: `<p>銘柄カードをタップすると詳細チャートが見られます。上部のタブで種類を切り替えられます。</p>
+    body: `<p>銘柄カードをタップすると詳細チャートが見られます。</p>
+<p><strong>使い方（先にこれだけ覚える）</strong></p>
+<ol class="tut-list">
+  <li>上段の<strong>時間軸ボタン</strong>で「15分足 / 1時間足 / 4時間足 / 日足」を選ぶ</li>
+  <li>下段の<strong>チャート種類タブ</strong>で見たい分析を選ぶ</li>
+  <li>迷ったら「ローソク+MA」から始める（値動きとトレンドを同時に見られる）</li>
+</ol>
+<p style="margin-top:8px;color:var(--ink-dim);font-size:12px">時間軸を長くするほど「細かいノイズ」が減り、大きな流れが見えやすくなります。</p>
 <p><strong>ローソク足</strong>は1本の棒で4つの情報をまとめたものです：</p>
 <table class="tut-table">
   <tr><td>始値</td><td>その時間帯が始まったときの株価</td></tr>
@@ -1179,8 +1251,9 @@ const TUTORIAL_STEPS = [
 </p>`,
   },
   {
-    title: '〰 チャートの種類② 移動平均線',
-    body: `<p><strong>移動平均線(MA)</strong>は「過去N本のローソクの終値の平均を線でつないだもの」です。</p>
+    title: '〰 チャートの種類② ローソク+移動平均（統合）',
+    body: `<p><strong>ローソク+MA</strong>は、ローソク足の上に移動平均線を重ねた統合チャートです。</p>
+<p>「いまの値動き（ローソク）」と「全体の流れ（MA）」を1画面で同時に判断できます。</p>
 <table class="tut-table">
   <tr><td style="color:#f9c74f">■ 黄色(SMA5)</td><td>直近5本の平均。価格の近くを動く</td></tr>
   <tr><td style="color:#4ecdc4">■ 青(SMA20)</td><td>直近20本の平均。中期的な流れを示す</td></tr>
