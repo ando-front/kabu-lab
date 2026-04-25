@@ -43,6 +43,8 @@
       <span class="yen">¥</span><span id="totalValue">1,000,000</span>
     </div>
     <div id="totalDelta" class="portfolio-delta zero">— (開始時から)</div>
+    <div id="portfolioGraph" class="portfolio-graph-wrap"></div>
+    <div id="diversityScore" class="diversity-score"></div>
     <div class="portfolio-stats">
       <div><div class="stat-label">現金</div><div class="stat-value" id="cash">¥1,000,000</div></div>
       <div><div class="stat-label">株の評価額</div><div class="stat-value" id="stockValue">¥0</div></div>
@@ -86,6 +88,16 @@
     </div>
   </div>
 </div>
+
+<div class="modal-backdrop" id="reviewModal">
+  <div class="modal review-modal">
+    <button class="modal-close" onclick="closeReview()">×</button>
+    <div id="reviewContent"></div>
+    <button class="tut-btn tut-btn-next" style="width:100%;margin-top:20px" onclick="closeReview()">✓ 閉じる</button>
+  </div>
+</div>
+
+<div id="newsToast" class="news-toast"></div>
 
 <div class="modal-backdrop" id="tutorialModal">
   <div class="modal tutorial-modal">

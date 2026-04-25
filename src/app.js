@@ -1,5 +1,5 @@
 import { STOCKS } from './stocks.js';
-import { tickPrice, isMarketOpen, formatSimTime, advanceTime } from './simulator.js';
+import { tickPrice, isMarketOpen, formatSimTime, advanceTime, checkNewsEvent, NEWS_EVENTS } from './simulator.js';
 
 // ============ 状態 ============
 const STORAGE_KEY = 'kabu_state_v2';
@@ -14,6 +14,10 @@ function defaultState() {
     prices: {},
     prevClose: {},
     simMinute: 9 * 60, // Day 1 · 09:00 から開始
+    newsLog: [],       // 発生したニュース履歴
+    firedNewsIds: [],  // 再発防止用
+    portfolioHistory: [], // 資産推移 [{t, value}]
+    lastReviewDay: 0,  // 最後に振り返りを表示した日
   };
 }
 
@@ -50,6 +54,7 @@ let simSpeed = 1;
 let simTickTimer = null;
 let lastPrices = {};
 let lastTotalValue = null;
+let activeNewsEvent = null; // 表示中のニュース
 
 // ============ 初期化 ============
 function initPrices() {
@@ -73,6 +78,14 @@ function simTick() {
     });
   }
 
+  // ニュースイベント判定
+  if (!state.firedNewsIds) state.firedNewsIds = [];
+  if (!state.newsLog) state.newsLog = [];
+  const newsEvt = checkNewsEvent(state.simMinute, state.firedNewsIds);
+  if (newsEvt) {
+    applyNewsEvent(newsEvt);
+  }
+
   const nextMinute = advanceTime(state.simMinute);
   // 日またぎの判定(15:00到達時に前日終値更新)
   const currentDayMin = state.simMinute % (24 * 60);
@@ -81,6 +94,22 @@ function simTick() {
     STOCKS.forEach(stock => { state.prevClose[stock.ticker] = state.prices[stock.ticker]; });
   }
   state.simMinute = nextMinute;
+
+  // 資産推移を記録（10分ごと）
+  if (state.simMinute % 10 === 0) {
+    if (!state.portfolioHistory) state.portfolioHistory = [];
+    const totalVal = state.cash + getTotalStockValue();
+    state.portfolioHistory.push({ t: state.simMinute, value: totalVal });
+    if (state.portfolioHistory.length > 500) state.portfolioHistory.shift();
+  }
+
+  // 週次振り返りチェック（7日ごと）
+  const currentDay = Math.floor(state.simMinute / (24 * 60));
+  if (!state.lastReviewDay) state.lastReviewDay = 0;
+  if (currentDay > 0 && currentDay % 7 === 0 && currentDay !== state.lastReviewDay) {
+    state.lastReviewDay = currentDay;
+    showWeeklyReview(currentDay);
+  }
 
   if (state.simMinute % 10 === 0) saveState();
   render();
@@ -129,6 +158,36 @@ function buildSparkline(ticker, isUp) {
   </svg>`;
 }
 
+function buildPortfolioGraph() {
+  const hist = state.portfolioHistory || [];
+  if (hist.length < 2) return '<div class="pg-empty">まだデータが少ない。しばらく運用すると資産推移グラフが表示されます。</div>';
+  const values = hist.map(h => h.value);
+  const min = Math.min(...values, state.initialCapital) * 0.998;
+  const max = Math.max(...values, state.initialCapital) * 1.002;
+  const range = max - min || 1;
+  const W = 600, H = 120;
+  const toX = (i) => (i / (hist.length - 1)) * W;
+  const toY = (v) => H - ((v - min) / range) * H;
+  const points = hist.map((h, i) => `${toX(i).toFixed(1)},${toY(h.value).toFixed(1)}`).join(' ');
+  const baseY = toY(state.initialCapital).toFixed(1);
+  const lastVal = values[values.length - 1];
+  const isUp = lastVal >= state.initialCapital;
+  const color = isUp ? 'var(--green)' : 'var(--red)';
+  const fillId = 'pgFill';
+  return `<svg class="portfolio-graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <defs>
+      <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.25"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <line x1="0" y1="${baseY}" x2="${W}" y2="${baseY}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,3"/>
+    <polygon points="${toX(0).toFixed(1)},${H} ${points} ${toX(hist.length-1).toFixed(1)},${H}"
+      fill="url(#${fillId})"/>
+    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+  </svg>`;
+}
+
 // ============ レンダリング ============
 function getTotalStockValue() {
   let total = 0;
@@ -145,11 +204,150 @@ function render() {
   renderHoldings();
   renderStocks();
   renderJournal();
+  renderDiversityScore();
   if (currentModalStock && document.getElementById('modal').classList.contains('show')) {
     updateModalPrice();
     updateSummary();
   }
 }
+
+// ============ ニュースイベント適用 ============
+function applyNewsEvent(evt) {
+  const affected = [];
+  STOCKS.forEach(stock => {
+    const matchTicker = evt.ticker && evt.ticker === stock.ticker;
+    const matchTag = evt.tag && evt.tag === stock.tag;
+    const isGlobal = !evt.ticker && !evt.tag;
+    if (matchTicker || matchTag || isGlobal) {
+      const before = state.prices[stock.ticker];
+      let newPrice = before * (1 + evt.effect);
+      // 1tickの±5%制限を適用
+      newPrice = Math.max(before * 0.95, Math.min(before * 1.05, newPrice));
+      newPrice = newPrice < 100 ? Math.round(newPrice * 10) / 10 : Math.round(newPrice);
+      state.prices[stock.ticker] = newPrice;
+      if (priceHistory[stock.ticker]) {
+        priceHistory[stock.ticker].push({ t: state.simMinute, price: newPrice });
+        if (priceHistory[stock.ticker].length > 150) priceHistory[stock.ticker].shift();
+      }
+      affected.push(stock.name);
+    }
+  });
+  state.firedNewsIds.push(evt.id);
+  const entry = { ...evt, simMinute: state.simMinute, affected };
+  state.newsLog.push(entry);
+  activeNewsEvent = entry;
+  showNewsToast(entry);
+}
+
+function showNewsToast(evt) {
+  const el = document.getElementById('newsToast');
+  const dirCls = evt.effect > 0 ? 'news-up' : 'news-down';
+  const dirStr = evt.effect > 0 ? '▲' : '▼';
+  const pct = Math.abs(Math.round(evt.effect * 100));
+  el.innerHTML = `
+    <div class="news-toast-header"><span class="news-badge">📰 ニュース速報</span><span class="news-pct ${dirCls}">${dirStr}${pct}%</span></div>
+    <div class="news-headline">${evt.headline}</div>
+    <div class="news-detail">${evt.detail}</div>
+    <div class="news-affected">影響: ${evt.affected.join('・')}</div>
+  `;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 8000);
+}
+
+// ============ 分散スコア ============
+function renderDiversityScore() {
+  const el = document.getElementById('diversityScore');
+  if (!el) return;
+  const tickers = Object.keys(state.holdings);
+  if (tickers.length === 0) {
+    el.innerHTML = '<span class="div-label">分散スコア</span><span class="div-score div-na">—</span><span class="div-msg">株を買うと分散度がわかる</span>';
+    return;
+  }
+  // 保有評価額の比率で計算（HHI逆数ベース）
+  const totalVal = getTotalStockValue();
+  const weights = tickers.map(t => {
+    const val = state.prices[t] * state.holdings[t].qty;
+    return val / totalVal;
+  });
+  const hhi = weights.reduce((sum, w) => sum + w * w, 0);
+  const n = tickers.length;
+  // HHI: 1=集中、1/n=均等。0〜100スコアに変換
+  const score = Math.round((1 - hhi) / (1 - 1 / Math.max(n, 2)) * 100);
+  const safeScore = Math.min(100, Math.max(0, isNaN(score) ? 0 : score));
+  let grade, msg, cls;
+  if (n === 1)       { grade = 'D'; msg = '1銘柄に全集中！分散してみよう'; cls = 'div-d'; }
+  else if (safeScore < 40) { grade = 'C'; msg = '一部に偏りがある。もう少し分けてみよう'; cls = 'div-c'; }
+  else if (safeScore < 70) { grade = 'B'; msg = 'まずまずの分散。バランスが取れてきた'; cls = 'div-b'; }
+  else               { grade = 'A'; msg = '優秀な分散投資！リスクが分散されている'; cls = 'div-a'; }
+  el.innerHTML = `<span class="div-label">分散スコア</span><span class="div-score ${cls}">${grade}<small>${safeScore}</small></span><span class="div-msg">${msg}</span>`;
+}
+
+// ============ 週次振り返り ============
+function showWeeklyReview(day) {
+  const weekNum = Math.floor(day / 7);
+  const weekStart = (weekNum - 1) * 7 * 24 * 60;
+  const weekEnd = weekNum * 7 * 24 * 60;
+
+  // 今週のジャーナルエントリ
+  const weekJournal = state.journal.filter(e => e.simMinute >= weekStart && e.simMinute < weekEnd);
+  // 今週のニュース
+  const weekNews = (state.newsLog || []).filter(e => e.simMinute >= weekStart && e.simMinute < weekEnd);
+  // 今週の資産推移（始値・終値）
+  const hist = (state.portfolioHistory || []).filter(e => e.t >= weekStart && e.t < weekEnd);
+  const weekStartVal = hist.length > 0 ? hist[0].value : state.initialCapital;
+  const weekEndVal = hist.length > 0 ? hist[hist.length - 1].value : state.cash + getTotalStockValue();
+  const weekDelta = weekEndVal - weekStartVal;
+  const weekPct = (weekDelta / weekStartVal) * 100;
+  const sign = weekDelta >= 0 ? '+' : '';
+  const cls = weekDelta > 0 ? 'positive' : weekDelta < 0 ? 'negative' : 'zero';
+
+  const journalHtml = weekJournal.length === 0
+    ? '<p style="color:var(--ink-dim);font-size:13px">今週はトレードなし</p>'
+    : weekJournal.map(e => {
+        const current = state.prices[e.ticker];
+        const pnl = current ? (current - e.price) * e.qty * (e.action === 'buy' ? 1 : 0) : null;
+        const pnlStr = pnl != null && e.action === 'buy'
+          ? `<span class="${pnl >= 0 ? 'positive' : 'negative'}">${pnl >= 0 ? '▲' : '▼'}${formatYen(Math.abs(pnl))} 現在</span>`
+          : '';
+        return `<div class="review-trade">
+          <div class="review-trade-head">
+            <span class="${e.action === 'buy' ? 'je-action-buy' : 'je-action-sell'}">${e.stockName}を${e.qty}株 ${e.action === 'buy' ? '買った' : '売った'}</span>
+            ${pnlStr}
+          </div>
+          <div class="review-reason">理由: 「${escapeHtml(e.note) || '(記録なし)'}」</div>
+        </div>`;
+      }).join('');
+
+  const newsHtml = weekNews.length === 0
+    ? '<p style="color:var(--ink-dim);font-size:13px">今週のニュースなし</p>'
+    : weekNews.map(e => `<div class="review-news-item">
+        <span class="${e.effect > 0 ? 'positive' : 'negative'}">${e.effect > 0 ? '▲' : '▼'}</span>
+        ${e.headline}
+      </div>`).join('');
+
+  document.getElementById('reviewContent').innerHTML = `
+    <h2 class="tut-title">📊 Week ${weekNum} 振り返り</h2>
+    <div class="review-perf">
+      <div class="review-perf-label">今週の損益</div>
+      <div class="review-perf-value ${cls}">${sign}${formatYen(weekDelta)} (${sign}${weekPct.toFixed(2)}%)</div>
+    </div>
+    <div class="review-section-title">📝 今週のトレードと理由</div>
+    ${journalHtml}
+    <div class="review-section-title" style="margin-top:18px">📰 今週起きたニュース</div>
+    ${newsHtml}
+    <div class="review-question">
+      <strong>🤔 考えてみよう</strong><br>
+      ${weekJournal.length > 0
+        ? '「なぜ買ったか」の理由と、実際の結果は一致していた？どんな判断が良くて、どんな判断がよくなかったかな？'
+        : '今週はトレードしなかったね。チャンスがあったとしたら、どの銘柄を買いたかった？'}
+    </div>
+  `;
+  document.getElementById('reviewModal').classList.add('show');
+}
+
+window.closeReview = function() {
+  document.getElementById('reviewModal').classList.remove('show');
+};
 
 function renderPortfolio() {
   const stockVal = getTotalStockValue();
@@ -179,6 +377,10 @@ function renderPortfolio() {
   const cls = delta > 0 ? 'positive' : delta < 0 ? 'negative' : 'zero';
   deltaEl.className = `portfolio-delta ${cls}`;
   deltaEl.textContent = `${sign} ${formatYen(Math.abs(delta))} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%) 開始時から`;
+
+  // 資産推移グラフ
+  const graphEl = document.getElementById('portfolioGraph');
+  if (graphEl) graphEl.innerHTML = buildPortfolioGraph();
 }
 
 function renderHoldings() {
@@ -540,4 +742,7 @@ document.getElementById('modal').addEventListener('click', (e) => {
 });
 document.getElementById('tutorialModal').addEventListener('click', (e) => {
   if (e.target.id === 'tutorialModal') closeTutorial();
+});
+document.getElementById('reviewModal').addEventListener('click', (e) => {
+  if (e.target.id === 'reviewModal') closeReview();
 });
