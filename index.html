@@ -14,6 +14,7 @@
   <header>
     <div class="logo">KABU_LAB</div>
     <div class="clock">
+      <button class="tut-open-btn" onclick="openMissions()">🏆 ミッション</button>
       <button class="tut-open-btn" onclick="openTutorial()">？ 使い方</button>
       <span class="mode-badge">SIM</span>
       市場時間 <span id="simClock">Day 1 · 09:00</span>
@@ -44,6 +45,7 @@
     </div>
     <div id="totalDelta" class="portfolio-delta zero">— (開始時から)</div>
     <div id="portfolioGraph" class="portfolio-graph-wrap"></div>
+    <div id="allocationRing" class="allocation-ring-wrap"></div>
     <div id="diversityScore" class="diversity-score"></div>
     <div class="portfolio-stats">
       <div><div class="stat-label">現金</div><div class="stat-value" id="cash">¥1,000,000</div></div>
@@ -59,6 +61,7 @@
   <div id="stocksGrid" class="stocks"></div>
 
   <div class="section-title">トレード日記</div>
+  <div style="margin-bottom:8px"><button class="tut-open-btn" onclick="exportJournal()">⬇ 日記をテキストで保存</button></div>
   <div id="journal"></div>
 </div>
 
@@ -69,6 +72,7 @@
     <div class="modal-subtitle" id="modalTicker">—</div>
     <div class="big-price" id="modalPrice">—</div>
     <div class="big-change" id="modalChange">—</div>
+    <div id="modalChart" class="modal-chart-wrap"></div>
     <div class="tab-switch">
       <button class="tab-btn active" id="tabBuy" onclick="switchTab('buy')">買う</button>
       <button class="tab-btn" id="tabSell" onclick="switchTab('sell')">売る</button>
@@ -86,6 +90,14 @@
       <div class="trade-summary" id="summary"></div>
       <button class="action-btn buy-btn" id="actionBtn" onclick="executeTrade()">買う</button>
     </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="missionModal">
+  <div class="modal mission-modal">
+    <button class="modal-close" onclick="closeMissions()">×</button>
+    <div id="missionContent"></div>
+    <button class="tut-btn tut-btn-next" style="width:100%;margin-top:16px" onclick="closeMissions()">✓ 閉じる</button>
   </div>
 </div>
 

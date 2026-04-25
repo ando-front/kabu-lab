@@ -247,6 +247,43 @@ header {
   font-size: 10px; font-family: 'JetBrains Mono', monospace;
   border-radius: 2px; font-weight: 700; letter-spacing: 1px;
 }
+/* ============ 銘柄詳細チャート（モーダル） ============ */
+.modal-chart-wrap { width: 100%; height: 100px; margin: 8px 0 18px; }
+.detail-chart { width: 100%; height: 100px; display: block; }
+
+/* ============ 保有損益バーチャート ============ */
+.pnl-bar-chart { margin-top: 18px; padding-top: 14px; border-top: 1px dashed var(--border); }
+.pnl-bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.pnl-bar-label { font-size: 11px; color: var(--ink-dim); width: 100px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pnl-bar-track { flex: 1; background: var(--border); height: 10px; border-radius: 2px; overflow: hidden; }
+.pnl-bar { height: 100%; border-radius: 2px; transition: width 0.4s ease; min-width: 2px; }
+.pnl-bar-up { background: var(--green); }
+.pnl-bar-down { background: var(--red); }
+.pnl-bar-val { font-family: 'JetBrains Mono', monospace; font-size: 12px; width: 52px; text-align: right; flex-shrink: 0; }
+
+/* ============ 資産構成リングチャート ============ */
+.allocation-ring-wrap { margin: 14px 0 0; }
+.ring-wrap { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.ring-svg { width: 120px; height: 120px; flex-shrink: 0; }
+.ring-legend { flex: 1; min-width: 140px; }
+.ring-legend-item { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; font-size: 12px; color: var(--ink); }
+.ring-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.ring-pct { margin-left: auto; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-dim); }
+
+/* ============ ミッション ============ */
+.mission-modal { max-width: 480px; }
+.mission-progress { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; font-size: 13px; color: var(--ink-dim); }
+.mission-bar-track { flex: 1; height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.mission-bar-fill { height: 100%; background: var(--green); border-radius: 4px; transition: width 0.4s ease; }
+.mission-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px dashed var(--border); }
+.mission-row:last-child { border-bottom: none; }
+.mission-row.mission-done .mission-title { color: var(--green); }
+.mission-row.mission-done .mission-desc { opacity: 0.5; }
+.mission-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+.mission-info { flex: 1; }
+.mission-title { font-weight: 700; font-size: 14px; margin-bottom: 2px; }
+.mission-desc { font-size: 12px; color: var(--ink-dim); }
+
 /* ============ 資産推移グラフ ============ */
 .portfolio-graph-wrap {
   margin: 16px 0 0; width: 100%; height: 120px;

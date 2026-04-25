@@ -158,7 +158,141 @@ function buildSparkline(ticker, isUp) {
   </svg>`;
 }
 
+// ① 銘柄詳細チャート（モーダル内・大きめ・売買マーカー付き）
+function buildDetailChart(ticker) {
+  const history = priceHistory[ticker];
+  if (!history || history.length < 2) return '<div class="pg-empty">データ蓄積中...</div>';
+  const prices = history.map(h => h.price);
+  const times  = history.map(h => h.t);
+  const min = Math.min(...prices) * 0.997;
+  const max = Math.max(...prices) * 1.003;
+  const range = max - min || 1;
+  const W = 600, H = 100;
+  const toX = (i) => (i / (history.length - 1)) * W;
+  const toY = (v) => H - ((v - min) / range) * H;
+  const pts  = history.map((h, i) => `${toX(i).toFixed(1)},${toY(h.price).toFixed(1)}`).join(' ');
+  const isUp = prices[prices.length - 1] >= prices[0];
+  const color = isUp ? 'var(--green)' : 'var(--red)';
+  // 売買マーカー
+  const trades = state.journal.filter(e => e.ticker === ticker);
+  const markers = trades.map(e => {
+    // 一番近いhistoryインデックスを探す
+    let closest = 0, bestDiff = Infinity;
+    history.forEach((h, i) => { const d = Math.abs(h.t - e.simMinute); if (d < bestDiff) { bestDiff = d; closest = i; } });
+    const cx = toX(closest).toFixed(1);
+    const cy = toY(history[closest].price).toFixed(1);
+    const fill = e.action === 'buy' ? 'var(--green)' : 'var(--red)';
+    return `<circle cx="${cx}" cy="${cy}" r="5" fill="${fill}" opacity="0.9"/>
+      <text x="${cx}" y="${(parseFloat(cy) - 8).toFixed(1)}" text-anchor="middle" fill="${fill}" font-size="9" font-family="sans-serif">${e.action === 'buy' ? '買' : '売'}</text>`;
+  }).join('');
+  return `<svg class="detail-chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <polyline points="${pts}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+    ${markers}
+  </svg>`;
+}
+
+// ② 保有銘柄別損益バーチャート（水平）
+function buildPnlBarChart() {
+  const tickers = Object.keys(state.holdings);
+  if (tickers.length === 0) return '';
+  const items = tickers.map(t => {
+    const h = state.holdings[t];
+    const cur = state.prices[t];
+    const pnl = (cur - h.avgCost) * h.qty;
+    const pct = ((cur - h.avgCost) / h.avgCost) * 100;
+    const name = STOCKS.find(s => s.ticker === t)?.name || t;
+    return { name, pnl, pct };
+  }).sort((a, b) => b.pnl - a.pnl);
+  const maxAbs = Math.max(...items.map(i => Math.abs(i.pnl)), 1);
+  const rows = items.map(item => {
+    const w = Math.round((Math.abs(item.pnl) / maxAbs) * 100);
+    const isUp = item.pnl >= 0;
+    const cls = isUp ? 'pnl-bar-up' : 'pnl-bar-down';
+    const sign = isUp ? '+' : '';
+    const pct = item.pct.toFixed(1);
+    return `<div class="pnl-bar-row">
+      <div class="pnl-bar-label">${item.name}</div>
+      <div class="pnl-bar-track">
+        <div class="pnl-bar ${cls}" style="width:${w}%"></div>
+      </div>
+      <div class="pnl-bar-val ${isUp ? 'positive' : 'negative'}">${sign}${pct}%</div>
+    </div>`;
+  }).join('');
+  return `<div class="pnl-bar-chart">${rows}</div>`;
+}
+
+// ③ 資産構成リングチャート（現金 + 各銘柄）
+function buildAllocationRing() {
+  const tickers = Object.keys(state.holdings);
+  const totalStock = getTotalStockValue();
+  const total = state.cash + totalStock;
+  if (total <= 0) return '';
+  // セグメント定義
+  const COLORS = ['#7bd88f','#f9c74f','#ff6b6b','#4ecdc4','#a29bfe','#fd79a8','#fdcb6e','#6c5ce7','#00b894','#e17055','#74b9ff','#55efc4'];
+  const segments = [{ label: '現金', value: state.cash, color: '#5a7a65' }];
+  tickers.forEach((t, i) => {
+    const val = state.prices[t] * state.holdings[t].qty;
+    const name = STOCKS.find(s => s.ticker === t)?.name || t;
+    segments.push({ label: name, value: val, color: COLORS[i % COLORS.length] });
+  });
+  // SVGパス生成
+  const cx = 80, cy = 80, r = 60, ir = 38;
+  let startAngle = -Math.PI / 2;
+  let paths = '', legend = '';
+  segments.forEach(seg => {
+    const angle = (seg.value / total) * 2 * Math.PI;
+    const endAngle = startAngle + angle;
+    const x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(endAngle),   y2 = cy + r * Math.sin(endAngle);
+    const ix1 = cx + ir * Math.cos(startAngle), iy1 = cy + ir * Math.sin(startAngle);
+    const ix2 = cx + ir * Math.cos(endAngle),   iy2 = cy + ir * Math.sin(endAngle);
+    const lg = angle > Math.PI ? 1 : 0;
+    if (angle > 0.01) {
+      paths += `<path d="M${x1.toFixed(1)},${y1.toFixed(1)} A${r},${r} 0 ${lg},1 ${x2.toFixed(1)},${y2.toFixed(1)} L${ix2.toFixed(1)},${iy2.toFixed(1)} A${ir},${ir} 0 ${lg},0 ${ix1.toFixed(1)},${iy1.toFixed(1)} Z" fill="${seg.color}" opacity="0.85"/>`;
+    }
+    const pct = ((seg.value / total) * 100).toFixed(1);
+    legend += `<div class="ring-legend-item"><span class="ring-dot" style="background:${seg.color}"></span><span>${seg.label}</span><span class="ring-pct">${pct}%</span></div>`;
+    startAngle = endAngle;
+  });
+  return `<div class="ring-wrap">
+    <svg viewBox="0 0 160 160" class="ring-svg">
+      ${paths}
+      <text x="${cx}" y="${cy - 6}" text-anchor="middle" fill="var(--ink-dim)" font-size="9" font-family="JetBrains Mono,monospace">合計</text>
+      <text x="${cx}" y="${cy + 10}" text-anchor="middle" fill="var(--ink)" font-size="11" font-weight="bold" font-family="JetBrains Mono,monospace">¥${Math.round(total).toLocaleString('ja-JP')}</text>
+    </svg>
+    <div class="ring-legend">${legend}</div>
+  </div>`;
+}
+
 function buildPortfolioGraph() {
+  const hist = state.portfolioHistory || [];
+  if (hist.length < 2) return '<div class="pg-empty">まだデータが少ない。しばらく運用すると資産推移グラフが表示されます。</div>';
+  const values = hist.map(h => h.value);
+  const min = Math.min(...values, state.initialCapital) * 0.998;
+  const max = Math.max(...values, state.initialCapital) * 1.002;
+  const range = max - min || 1;
+  const W = 600, H = 120;
+  const toX = (i) => (i / (hist.length - 1)) * W;
+  const toY = (v) => H - ((v - min) / range) * H;
+  const points = hist.map((h, i) => `${toX(i).toFixed(1)},${toY(h.value).toFixed(1)}`).join(' ');
+  const baseY = toY(state.initialCapital).toFixed(1);
+  const lastVal = values[values.length - 1];
+  const isUp = lastVal >= state.initialCapital;
+  const color = isUp ? 'var(--green)' : 'var(--red)';
+  const fillId = 'pgFill';
+  return `<svg class="portfolio-graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+    <defs>
+      <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="${color}" stop-opacity="0.25"/>
+        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    <line x1="0" y1="${baseY}" x2="${W}" y2="${baseY}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,3"/>
+    <polygon points="${toX(0).toFixed(1)},${H} ${points} ${toX(hist.length-1).toFixed(1)},${H}"
+      fill="url(#${fillId})"/>
+    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
+  </svg>`;
+}
   const hist = state.portfolioHistory || [];
   if (hist.length < 2) return '<div class="pg-empty">まだデータが少ない。しばらく運用すると資産推移グラフが表示されます。</div>';
   const values = hist.map(h => h.value);
@@ -381,6 +515,9 @@ function renderPortfolio() {
   // 資産推移グラフ
   const graphEl = document.getElementById('portfolioGraph');
   if (graphEl) graphEl.innerHTML = buildPortfolioGraph();
+  // 資産構成リング
+  const ringEl = document.getElementById('allocationRing');
+  if (ringEl) ringEl.innerHTML = buildAllocationRing();
 }
 
 function renderHoldings() {
@@ -410,6 +547,8 @@ function renderHoldings() {
     </tr>`;
   }
   html += '</tbody></table>';
+  // PnL横棒グラフ
+  html += buildPnlBarChart();
   container.innerHTML = html;
 }
 
@@ -481,6 +620,8 @@ function openModal(ticker) {
   document.getElementById('modalName').textContent = stock.name;
   document.getElementById('modalTicker').textContent = `${stock.ticker} · ${stock.desc}`;
   updateModalPrice();
+  // 詳細チャート描画
+  document.getElementById('modalChart').innerHTML = buildDetailChart(ticker);
   switchTab('buy');
   document.getElementById('qty').value = 1;
   document.getElementById('note').value = '';
@@ -616,6 +757,7 @@ window.executeTrade = function() {
     showToast(`${stock.name}を${qty}株 売った`);
   }
   saveState();
+  checkMissionUnlocks();
   closeModal();
   render();
 };
@@ -728,6 +870,88 @@ function renderTutorial() {
   }
 }
 
+// ============ ミッション（Phase 2） ============
+const MISSIONS = [
+  { id: 'm01', title: 'はじめての買い',    desc: '株を1株以上買ってみよう',              check: (s) => s.journal.some(e => e.action === 'buy') },
+  { id: 'm02', title: '理由を書こう',      desc: '「なぜ買うか」を入力して購入しよう',    check: (s) => s.journal.some(e => e.action === 'buy' && e.note && e.note.length >= 5) },
+  { id: 'm03', title: 'はじめての売り',    desc: '保有株を1株以上売ってみよう',          check: (s) => s.journal.some(e => e.action === 'sell') },
+  { id: 'm04', title: '3銘柄に分散',       desc: '3種類以上の銘柄を同時に保有しよう',    check: (s) => Object.keys(s.holdings).length >= 3 },
+  { id: 'm05', title: '5銘柄に分散',       desc: '5種類以上の銘柄を同時に保有しよう',    check: (s) => Object.keys(s.holdings).length >= 5 },
+  { id: 'm06', title: 'プラス転換！',       desc: '総資産が初期資金を上回ろう',           check: (s) => (s.cash + Object.entries(s.holdings).reduce((a,[t,h]) => a + (s.prices[t]||0)*h.qty, 0)) > s.initialCapital },
+  { id: 'm07', title: '10回トレード',       desc: 'トレードを合計10回以上しよう',         check: (s) => s.journal.length >= 10 },
+  { id: 'm08', title: 'ニュースを活かせ',   desc: 'ニュースイベントが5回以上発生するまで運用しよう', check: (s) => (s.firedNewsIds||[]).length >= 5 },
+  { id: 'm09', title: '1週間続けた',       desc: 'シム内7日間以上運用しよう',            check: (s) => Math.floor(s.simMinute / (24*60)) >= 7 },
+  { id: 'm10', title: '長期投資家',         desc: 'シム内30日間以上運用しよう',           check: (s) => Math.floor(s.simMinute / (24*60)) >= 30 },
+];
+
+function getMissionStatus() {
+  return MISSIONS.map(m => ({ ...m, done: m.check(state) }));
+}
+
+window.openMissions = function() {
+  const missions = getMissionStatus();
+  const done = missions.filter(m => m.done).length;
+  const rows = missions.map(m => `
+    <div class="mission-row ${m.done ? 'mission-done' : ''}">
+      <span class="mission-icon">${m.done ? '✅' : '⬜'}</span>
+      <div class="mission-info">
+        <div class="mission-title">${m.title}</div>
+        <div class="mission-desc">${m.desc}</div>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('missionContent').innerHTML = `
+    <h2 class="tut-title">🏆 ミッション</h2>
+    <div class="mission-progress">
+      <div class="mission-bar-track"><div class="mission-bar-fill" style="width:${Math.round(done/missions.length*100)}%"></div></div>
+      <span>${done} / ${missions.length} 達成</span>
+    </div>
+    ${rows}
+  `;
+  document.getElementById('missionModal').classList.add('show');
+};
+
+window.closeMissions = function() {
+  document.getElementById('missionModal').classList.remove('show');
+};
+
+// ミッション達成トースト
+function checkMissionUnlocks() {
+  if (!state.unlockedMissions) state.unlockedMissions = [];
+  MISSIONS.forEach(m => {
+    if (!state.unlockedMissions.includes(m.id) && m.check(state)) {
+      state.unlockedMissions.push(m.id);
+      showToast(`🏆 ミッション達成: ${m.title}`, false);
+    }
+  });
+}
+
+// ============ 日記エクスポート（Phase 2） ============
+window.exportJournal = function() {
+  const total = state.cash + getTotalStockValue();
+  const delta = total - state.initialCapital;
+  const sign = delta >= 0 ? '+' : '';
+  const lines = [
+    `カブラボ トレード日記`,
+    `エクスポート日時: ${new Date().toLocaleString('ja-JP')}`,
+    `シム経過: ${formatSimTime(state.simMinute)}`,
+    `初期資金: ¥${state.initialCapital.toLocaleString('ja-JP')}`,
+    `現在資産: ¥${Math.round(total).toLocaleString('ja-JP')} (${sign}¥${Math.round(Math.abs(delta)).toLocaleString('ja-JP')})`,
+    ``,
+    `===== トレード履歴 =====`,
+  ];
+  state.journal.forEach((e, i) => {
+    const act = e.action === 'buy' ? '買い' : '売り';
+    lines.push(`[${i+1}] ${formatSimTime(e.simMinute)} - ${e.stockName}(${e.ticker}) ${act} ${e.qty}株 @ ¥${Math.round(e.price).toLocaleString('ja-JP')} (合計¥${Math.round(e.total).toLocaleString('ja-JP')})`);
+    lines.push(`    理由: ${e.note || '(記録なし)'}`);
+  });
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'kabu-lab-journal.txt'; a.click();
+  URL.revokeObjectURL(url);
+};
+
 // ============ ブート ============
 if (state.onboardingSeen) {
   document.getElementById('onboarding').style.display = 'none';
@@ -745,4 +969,7 @@ document.getElementById('tutorialModal').addEventListener('click', (e) => {
 });
 document.getElementById('reviewModal').addEventListener('click', (e) => {
   if (e.target.id === 'reviewModal') closeReview();
+});
+document.getElementById('missionModal').addEventListener('click', (e) => {
+  if (e.target.id === 'missionModal') closeMissions();
 });
