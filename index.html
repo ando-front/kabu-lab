@@ -61,7 +61,10 @@
   <div id="stocksGrid" class="stocks"></div>
 
   <div class="section-title">トレード日記</div>
-  <div style="margin-bottom:8px"><button class="tut-open-btn" onclick="exportJournal()">⬇ 日記をテキストで保存</button></div>
+  <div style="margin-bottom:8px">
+    <button class="tut-open-btn" onclick="exportJournal()">⬇ 日記をテキストで保存</button>
+    <button class="tut-open-btn" onclick="openParentReport()" style="margin-left:8px">📋 保護者レポート</button>
+  </div>
   <div id="journal"></div>
 </div>
 
@@ -76,7 +79,9 @@
     <div class="tab-switch">
       <button class="tab-btn active" id="tabBuy" onclick="switchTab('buy')">買う</button>
       <button class="tab-btn" id="tabSell" onclick="switchTab('sell')">売る</button>
+      <button class="tab-btn" id="tabInfo" onclick="switchTab('info')">ℹ 情報</button>
     </div>
+    <div id="modalInfo" class="modal-info" style="display:none"></div>
     <div id="tradeForm">
       <div class="field">
         <label id="qtyLabel">株数</label>
@@ -89,6 +94,17 @@
       </div>
       <div class="trade-summary" id="summary"></div>
       <button class="action-btn buy-btn" id="actionBtn" onclick="executeTrade()">買う</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="parentReportModal">
+  <div class="modal parent-report-modal">
+    <button class="modal-close" onclick="closeParentReport()">×</button>
+    <div id="parentReportContent"></div>
+    <div style="display:flex;gap:10px;margin-top:16px">
+      <button class="tut-btn tut-btn-next" style="flex:1" onclick="printParentReport()">🖨 印刷</button>
+      <button class="tut-btn" style="flex:1" onclick="closeParentReport()">✓ 閉じる</button>
     </div>
   </div>
 </div>

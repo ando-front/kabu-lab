@@ -18,6 +18,8 @@ function defaultState() {
     firedNewsIds: [],  // 再発防止用
     portfolioHistory: [], // 資産推移 [{t, value}]
     lastReviewDay: 0,  // 最後に振り返りを表示した日
+    totalCommission: 0, // 支払い手数料累計
+    totalTax: 0,        // 支払い税金累計
   };
 }
 
@@ -293,34 +295,6 @@ function buildPortfolioGraph() {
     <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
   </svg>`;
 }
-  const hist = state.portfolioHistory || [];
-  if (hist.length < 2) return '<div class="pg-empty">まだデータが少ない。しばらく運用すると資産推移グラフが表示されます。</div>';
-  const values = hist.map(h => h.value);
-  const min = Math.min(...values, state.initialCapital) * 0.998;
-  const max = Math.max(...values, state.initialCapital) * 1.002;
-  const range = max - min || 1;
-  const W = 600, H = 120;
-  const toX = (i) => (i / (hist.length - 1)) * W;
-  const toY = (v) => H - ((v - min) / range) * H;
-  const points = hist.map((h, i) => `${toX(i).toFixed(1)},${toY(h.value).toFixed(1)}`).join(' ');
-  const baseY = toY(state.initialCapital).toFixed(1);
-  const lastVal = values[values.length - 1];
-  const isUp = lastVal >= state.initialCapital;
-  const color = isUp ? 'var(--green)' : 'var(--red)';
-  const fillId = 'pgFill';
-  return `<svg class="portfolio-graph" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    <defs>
-      <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stop-color="${color}" stop-opacity="0.25"/>
-        <stop offset="100%" stop-color="${color}" stop-opacity="0"/>
-      </linearGradient>
-    </defs>
-    <line x1="0" y1="${baseY}" x2="${W}" y2="${baseY}" stroke="var(--border)" stroke-width="1" stroke-dasharray="4,3"/>
-    <polygon points="${toX(0).toFixed(1)},${H} ${points} ${toX(hist.length-1).toFixed(1)},${H}"
-      fill="url(#${fillId})"/>
-    <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke"/>
-  </svg>`;
-}
 
 // ============ レンダリング ============
 function getTotalStockValue() {
@@ -528,22 +502,26 @@ function renderHoldings() {
     return;
   }
   let html = `<table><thead><tr>
-    <th>銘柄</th><th>株数</th><th>平均取得</th><th>現在値</th><th>損益</th>
+    <th>銘柄</th><th>株数</th><th>平均取得</th><th>現在値</th><th>損益</th><th>保有期間</th>
   </tr></thead><tbody>`;
+  const currentDay = Math.floor(state.simMinute / (24 * 60));
   for (const ticker of tickers) {
     const h = state.holdings[ticker];
     const stock = STOCKS.find(s => s.ticker === ticker);
     const current = state.prices[ticker];
+    const holdDays = h.buyMinute != null ? Math.max(0, currentDay - Math.floor(h.buyMinute / (24 * 60))) : '—';
     const pnl = current ? (current - h.avgCost) * h.qty : 0;
     const pnlPct = current ? ((current - h.avgCost) / h.avgCost) * 100 : 0;
     const cls = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : 'zero';
     const sign = pnl > 0 ? '+' : '';
+    const holdLabel = holdDays === '—' ? '—' : holdDays === 0 ? '本日' : `${holdDays}日`;
     html += `<tr>
       <td><strong style="font-family:'Zen Kaku Gothic New'">${stock?.name || ticker}</strong></td>
       <td>${h.qty}株</td>
       <td>${formatYen(h.avgCost)}</td>
       <td>${formatYen(current)}</td>
       <td class="${cls}">${sign}${formatYen(pnl)} (${sign}${pnlPct.toFixed(1)}%)</td>
+      <td style="font-size:11px;color:var(--ink-dim)">${holdLabel}</td>
     </tr>`;
   }
   html += '</tbody></table>';
@@ -618,10 +596,22 @@ function openModal(ticker) {
   if (!stock || price == null) return;
   currentModalStock = stock;
   document.getElementById('modalName').textContent = stock.name;
-  document.getElementById('modalTicker').textContent = `${stock.ticker} · ${stock.desc}`;
+  document.getElementById('modalTicker').textContent = `${stock.ticker} · ${stock.tag}`;
   updateModalPrice();
   // 詳細チャート描画
   document.getElementById('modalChart').innerHTML = buildDetailChart(ticker);
+  // 会社情報タブ内容
+  const holdInfo = state.holdings[ticker];
+  const holdDays = holdInfo?.buyMinute != null ? Math.max(0, Math.floor(state.simMinute/(24*60)) - Math.floor(holdInfo.buyMinute/(24*60))) : null;
+  document.getElementById('modalInfo').innerHTML = `
+    <div class="info-desc">${escapeHtml(stock.desc)}</div>
+    <div class="info-stats">
+      <div><span class="info-label">タグ</span><span>${stock.tag}</span></div>
+      <div><span class="info-label">基準株価</span><span>${formatYen(stock.basePrice)}</span></div>
+      <div><span class="info-label">ボラティリティ</span><span>${(stock.vol*100).toFixed(1)}%/年</span></div>
+      ${holdInfo ? `<div><span class="info-label">保有中</span><span class="positive">${holdInfo.qty}株 (${holdDays != null ? holdDays+'日保有' : ''})</span></div>` : ''}
+    </div>
+  `;
   switchTab('buy');
   document.getElementById('qty').value = 1;
   document.getElementById('note').value = '';
@@ -652,6 +642,9 @@ window.switchTab = function(tab) {
   currentTab = tab;
   document.getElementById('tabBuy').classList.toggle('active', tab === 'buy');
   document.getElementById('tabSell').classList.toggle('active', tab === 'sell');
+  document.getElementById('tabInfo').classList.toggle('active', tab === 'info');
+  document.getElementById('tradeForm').style.display = tab === 'info' ? 'none' : '';
+  document.getElementById('modalInfo').style.display = tab === 'info' ? '' : 'none';
   const btn = document.getElementById('actionBtn');
   const noteField = document.getElementById('noteField');
   const noteLabel = noteField.querySelector('label');
@@ -696,22 +689,40 @@ function renderQuickButtons() {
   });
 }
 
+// 手数料計算: 約定代金の0.45%、最低500円
+function calcCommission(amount) {
+  return Math.max(500, Math.round(amount * 0.0045));
+}
+// 譲渡益税計算: 利益の20.315%
+function calcTax(profit) {
+  return profit > 0 ? Math.round(profit * 0.20315) : 0;
+}
+
 window.updateSummary = function() {
   if (!currentModalStock) return;
   const qty = parseInt(document.getElementById('qty').value) || 0;
   const price = state.prices[currentModalStock.ticker];
-  const total = qty * price;
+  const amount = qty * price;
+  const commission = qty > 0 ? calcCommission(amount) : 0;
   const btn = document.getElementById('actionBtn');
   let html = `<div class="row"><span>株価</span><span>${formatYen(price)}</span></div>`;
   html += `<div class="row"><span>株数</span><span>${qty} 株</span></div>`;
-  html += `<div class="row total"><span>${currentTab === 'buy' ? '必要資金' : '受取金額'}</span><span>${formatYen(total)}</span></div>`;
+  html += `<div class="row"><span>売買代金</span><span>${formatYen(amount)}</span></div>`;
+  html += `<div class="row" style="color:var(--ink-dim);font-size:11px"><span>手数料(0.45%)</span><span>${formatYen(commission)}</span></div>`;
   if (currentTab === 'buy') {
-    const afterCash = state.cash - total;
-    html += `<div class="row" style="color: var(--ink-dim); font-size: 11px; margin-top: 6px;"><span>買った後の現金</span><span>${formatYen(afterCash)}</span></div>`;
-    btn.disabled = qty <= 0 || total > state.cash;
+    const totalCost = amount + commission;
+    html += `<div class="row total"><span>合計必要額</span><span>${formatYen(totalCost)}</span></div>`;
+    const afterCash = state.cash - totalCost;
+    html += `<div class="row" style="color: var(--ink-dim); font-size: 11px; margin-top: 6px;"><span>買った後の現金</span><span style="color:${afterCash < 0 ? 'var(--red)' : 'inherit'}">${formatYen(afterCash)}</span></div>`;
+    btn.disabled = qty <= 0 || totalCost > state.cash;
   } else {
     const owned = state.holdings[currentModalStock.ticker];
     const ownedQty = owned ? owned.qty : 0;
+    const profit = owned ? (price - owned.avgCost) * qty : 0;
+    const tax = calcTax(profit);
+    const netReceive = amount - commission - tax;
+    if (tax > 0) html += `<div class="row" style="color:var(--ink-dim);font-size:11px"><span>譲渡益税(20.3%)</span><span>${formatYen(tax)}</span></div>`;
+    html += `<div class="row total"><span>手取り</span><span>${formatYen(netReceive)}</span></div>`;
     html += `<div class="row" style="color: var(--ink-dim); font-size: 11px; margin-top: 6px;"><span>保有株数</span><span>${ownedQty} 株</span></div>`;
     btn.disabled = qty <= 0 || qty > ownedQty;
   }
@@ -725,36 +736,48 @@ window.executeTrade = function() {
   const price = state.prices[stock.ticker];
   const total = qty * price;
 
+  const commission = calcCommission(total);
   if (currentTab === 'buy') {
-    if (total > state.cash || qty <= 0) return;
-    state.cash -= total;
+    const totalCost = total + commission;
+    if (totalCost > state.cash || qty <= 0) return;
+    state.cash -= totalCost;
+    if (!state.totalCommission) state.totalCommission = 0;
+    state.totalCommission += commission;
     const existing = state.holdings[stock.ticker];
     if (existing) {
       const newQty = existing.qty + qty;
       const newAvg = ((existing.avgCost * existing.qty) + (price * qty)) / newQty;
-      state.holdings[stock.ticker] = { qty: newQty, avgCost: newAvg };
+      state.holdings[stock.ticker] = { qty: newQty, avgCost: newAvg, buyMinute: existing.buyMinute };
     } else {
-      state.holdings[stock.ticker] = { qty, avgCost: price };
+      state.holdings[stock.ticker] = { qty, avgCost: price, buyMinute: state.simMinute };
     }
     state.journal.push({
       simMinute: state.simMinute, action: 'buy', ticker: stock.ticker, stockName: stock.name,
-      qty, price, total, note
+      qty, price, total, commission, note
     });
-    showToast(`${stock.name}を${qty}株 買った`);
+    showToast(`${stock.name}を${qty}株 買った (手数料 ${formatYen(commission)})`);
   } else {
     const existing = state.holdings[stock.ticker];
     if (!existing || qty > existing.qty) return;
-    state.cash += total;
+    const profit = (price - existing.avgCost) * qty;
+    const tax = calcTax(profit);
+    const netReceive = total - commission - tax;
+    state.cash += netReceive;
+    if (!state.totalCommission) state.totalCommission = 0;
+    if (!state.totalTax) state.totalTax = 0;
+    state.totalCommission += commission;
+    state.totalTax += tax;
     if (existing.qty === qty) {
       delete state.holdings[stock.ticker];
     } else {
-      state.holdings[stock.ticker] = { qty: existing.qty - qty, avgCost: existing.avgCost };
+      state.holdings[stock.ticker] = { qty: existing.qty - qty, avgCost: existing.avgCost, buyMinute: existing.buyMinute };
     }
+    const taxMsg = tax > 0 ? ` 税${formatYen(tax)}` : '';
     state.journal.push({
       simMinute: state.simMinute, action: 'sell', ticker: stock.ticker, stockName: stock.name,
-      qty, price, total, note
+      qty, price, total, commission, tax, profit, note
     });
-    showToast(`${stock.name}を${qty}株 売った`);
+    showToast(`${stock.name}を${qty}株 売った (手取り ${formatYen(netReceive)}${taxMsg})`);
   }
   saveState();
   checkMissionUnlocks();
@@ -870,6 +893,101 @@ function renderTutorial() {
   }
 }
 
+// ============ 保護者向けレポート（Phase 2） ============
+window.openParentReport = function() {
+  const total = state.cash + getTotalStockValue();
+  const delta = total - state.initialCapital;
+  const deltaSign = delta >= 0 ? '▲' : '▼';
+  const deltaColor = delta >= 0 ? 'var(--green)' : 'var(--red)';
+  const currentDay = Math.floor(state.simMinute / (24 * 60));
+
+  // 直近7日のトレード
+  const recentTrades = state.journal.filter(e => {
+    const tradeDay = Math.floor(e.simMinute / (24 * 60));
+    return currentDay - tradeDay <= 7;
+  });
+
+  // 保有中の銘柄
+  const holdingRows = Object.entries(state.holdings).map(([ticker, h]) => {
+    const cur = state.prices[ticker];
+    const pnl = (cur - h.avgCost) * h.qty;
+    const holdDays = h.buyMinute != null ? Math.max(0, currentDay - Math.floor(h.buyMinute / (24*60))) : '—';
+    const name = STOCKS.find(s => s.ticker === ticker)?.name || ticker;
+    const sign = pnl >= 0 ? '+' : '';
+    const color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    return `<tr>
+      <td>${name}</td><td>${h.qty}株 / ${holdDays}日保有</td>
+      <td style="color:${color}">${sign}${formatYen(pnl)}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="3" style="color:var(--ink-dim)">保有なし</td></tr>';
+
+  // ミッション達成
+  const doneMissions = getMissionStatus().filter(m => m.done);
+  const missionText = doneMissions.length > 0
+    ? doneMissions.map(m => `✅ ${m.title}`).join('　')
+    : 'まだ達成なし';
+
+  // 直近トレード
+  const tradeRows = recentTrades.length > 0
+    ? recentTrades.reverse().map(e => {
+        const act = e.action === 'buy' ? '買い' : '売り';
+        return `<tr>
+          <td>${formatSimTime(e.simMinute)}</td>
+          <td>${e.stockName} ${act} ${e.qty}株</td>
+          <td style="font-size:11px;color:var(--ink-dim)">${escapeHtml(e.note || '理由の記録なし')}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="3" style="color:var(--ink-dim)">直近7日間のトレードなし</td></tr>';
+
+  const commissionTotal = state.totalCommission || 0;
+  const taxTotal = state.totalTax || 0;
+
+  document.getElementById('parentReportContent').innerHTML = `
+    <h2 class="tut-title">📋 保護者向けレポート</h2>
+    <div class="report-date">シム経過: ${formatSimTime(state.simMinute)} (${currentDay}日目)</div>
+
+    <div class="report-section">
+      <div class="report-label">💰 資産状況</div>
+      <table class="report-table">
+        <tr><td>初期資金</td><td>${formatYen(state.initialCapital)}</td></tr>
+        <tr><td>現在の総資産</td><td><strong>${formatYen(total)}</strong></td></tr>
+        <tr><td>損益</td><td style="color:${deltaColor}">${deltaSign} ${formatYen(Math.abs(delta))} (${(delta/state.initialCapital*100).toFixed(2)}%)</td></tr>
+        <tr><td>支払い手数料累計</td><td style="color:var(--ink-dim)">${formatYen(commissionTotal)}</td></tr>
+        <tr><td>支払い税金累計</td><td style="color:var(--ink-dim)">${formatYen(taxTotal)}</td></tr>
+      </table>
+    </div>
+
+    <div class="report-section">
+      <div class="report-label">📦 保有銘柄</div>
+      <table class="report-table"><thead><tr><th>銘柄</th><th>保有</th><th>損益</th></tr></thead><tbody>${holdingRows}</tbody></table>
+    </div>
+
+    <div class="report-section">
+      <div class="report-label">📝 直近7日間のトレード + 理由</div>
+      <table class="report-table"><thead><tr><th>時刻</th><th>取引</th><th>理由</th></tr></thead><tbody>${tradeRows}</tbody></table>
+    </div>
+
+    <div class="report-section">
+      <div class="report-label">🏆 達成済みミッション (${doneMissions.length}/${MISSIONS.length})</div>
+      <div style="font-size:13px;line-height:2">${missionText}</div>
+    </div>
+
+    <div class="report-section" style="color:var(--ink-dim);font-size:11px;border-top:1px dashed var(--border);padding-top:10px;margin-top:10px">
+      ※このシミュレーターは仮想資金を使った学習ツールです。実際の株取引とは異なります。<br>
+      保護者の方: 「なぜこの株を買ったの?」と一緒に会話してみてください。
+    </div>
+  `;
+  document.getElementById('parentReportModal').classList.add('show');
+};
+
+window.closeParentReport = function() {
+  document.getElementById('parentReportModal').classList.remove('show');
+};
+
+window.printParentReport = function() {
+  window.print();
+};
+
 // ============ ミッション（Phase 2） ============
 const MISSIONS = [
   { id: 'm01', title: 'はじめての買い',    desc: '株を1株以上買ってみよう',              check: (s) => s.journal.some(e => e.action === 'buy') },
@@ -972,4 +1090,7 @@ document.getElementById('reviewModal').addEventListener('click', (e) => {
 });
 document.getElementById('missionModal').addEventListener('click', (e) => {
   if (e.target.id === 'missionModal') closeMissions();
+});
+document.getElementById('parentReportModal').addEventListener('click', (e) => {
+  if (e.target.id === 'parentReportModal') closeParentReport();
 });
