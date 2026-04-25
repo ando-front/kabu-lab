@@ -247,6 +247,48 @@ header {
   font-size: 10px; font-family: 'JetBrains Mono', monospace;
   border-radius: 2px; font-weight: 700; letter-spacing: 1px;
 }
+.tut-open-btn {
+  background: none; border: 1px solid var(--border); color: var(--ink-dim);
+  padding: 4px 10px; border-radius: 2px; cursor: pointer;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  margin-right: 10px; transition: all 0.15s;
+}
+.tut-open-btn:hover { border-color: var(--green); color: var(--green); }
+.tutorial-modal { max-width: 480px; }
+.tut-title {
+  font-family: 'DotGothic16', monospace; font-size: 20px;
+  color: var(--green); margin-bottom: 18px; letter-spacing: 1px;
+}
+.tut-body { font-size: 14px; line-height: 1.8; color: var(--ink); }
+.tut-body p { margin-bottom: 10px; }
+.tut-table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+.tut-table td {
+  padding: 6px 12px; border: 1px solid var(--border);
+  font-family: 'JetBrains Mono', monospace; font-size: 13px;
+}
+.tut-table td:first-child { color: var(--yellow); width: 50px; }
+.tut-list { padding-left: 20px; margin: 4px 0; }
+.tut-list li { margin-bottom: 8px; }
+.tut-list li::marker { color: var(--green); }
+.tut-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 28px; padding-top: 18px; border-top: 1px dashed var(--border);
+}
+.tut-btn {
+  background: var(--border); border: none; color: var(--ink);
+  padding: 8px 18px; border-radius: 2px; cursor: pointer;
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; transition: all 0.15s;
+}
+.tut-btn:hover:not(:disabled) { background: var(--green); color: var(--bg); }
+.tut-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+.tut-btn-next { background: var(--green); color: var(--bg); }
+.tut-btn-next:hover { background: #9be9ae; }
+#tutDots { display: flex; gap: 6px; align-items: center; }
+.tut-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--border); transition: background 0.2s;
+}
+.tut-dot.active { background: var(--green); }
 @media (max-width: 600px) {
   .portfolio-value { font-size: 34px; }
   .portfolio-stats { grid-template-columns: 1fr 1fr; }

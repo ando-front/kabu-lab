@@ -14,6 +14,7 @@
   <header>
     <div class="logo">KABU_LAB</div>
     <div class="clock">
+      <button class="tut-open-btn" onclick="openTutorial()">？ 使い方</button>
       <span class="mode-badge">SIM</span>
       市場時間 <span id="simClock">Day 1 · 09:00</span>
       <div class="speed-control">
@@ -82,6 +83,18 @@
       </div>
       <div class="trade-summary" id="summary"></div>
       <button class="action-btn buy-btn" id="actionBtn" onclick="executeTrade()">買う</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="tutorialModal">
+  <div class="modal tutorial-modal">
+    <button class="modal-close" onclick="closeTutorial()">×</button>
+    <div id="tutContent"></div>
+    <div class="tut-nav">
+      <button class="tut-btn" id="tutPrev" onclick="tutorialStep(-1)">← 前へ</button>
+      <span id="tutDots"></span>
+      <button class="tut-btn tut-btn-next" id="tutNext" onclick="tutorialStep(1)">次へ →</button>
     </div>
   </div>
 </div>

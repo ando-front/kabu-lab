@@ -13,8 +13,19 @@ function defaultState() {
     onboardingSeen: false,
     prices: {},
     prevClose: {},
-    simMinute: 0,
+    simMinute: 9 * 60, // Day 1 · 09:00 から開始
   };
+}
+
+// 市場時間外（夜間・早朝）なら翌営業日9:00へスキップ
+function skipToNextMarketOpen() {
+  const dayMin = state.simMinute % (24 * 60);
+  const totalDays = Math.floor(state.simMinute / (24 * 60));
+  if (dayMin < 9 * 60) {
+    state.simMinute = totalDays * 24 * 60 + 9 * 60;
+  } else if (dayMin >= 15 * 60) {
+    state.simMinute = (totalDays + 1) * 24 * 60 + 9 * 60;
+  }
 }
 
 function loadState() {
@@ -429,14 +440,104 @@ window.resetAll = function() {
   }
 };
 
+// ============ チュートリアル ============
+const TUTORIAL_STEPS = [
+  {
+    title: '📈 カブラボとは？',
+    body: `<p><strong style="color:var(--yellow)">100万円の仮想マネー</strong>で、実際の株価水準をもとにしたトレード体験ができるシミュレータです。</p>
+<p>リアルなお金は一切減りません。だから思い切って試せます。</p>
+<p>目標は<strong>「なぜ買ったか？」を記録する習慣</strong>をつけること。あとで見返すと自分の思考の癖がわかります。</p>`,
+  },
+  {
+    title: '⏩ 時間を進めよう',
+    body: `<p>右上の速度ボタンで時間を早送りできます。</p>
+<table class="tut-table">
+  <tr><td>⏸</td><td>停止</td></tr>
+  <tr><td>1x</td><td>実時間（6秒で1分進む）</td></tr>
+  <tr><td>5x</td><td>5倍速</td></tr>
+  <tr><td>20x</td><td>20倍速（1分で約2日分）</td></tr>
+</table>
+<p style="margin-top:12px">⚠️ <strong>市場が動くのはシム内9:00〜15:00のみ。</strong><br>それ以外は翌日9:00へ自動スキップされます。</p>`,
+  },
+  {
+    title: '🛒 株の買い方',
+    body: `<ol class="tut-list">
+  <li>下の銘柄一覧から気になる株のカードをタップ</li>
+  <li>株数を入力（クイックボタンも使える）</li>
+  <li><strong style="color:var(--yellow)">「なぜ買う？」を必ず書こう</strong> ← これが一番大事！</li>
+  <li>「買う」ボタンを押して購入完了</li>
+</ol>
+<p style="margin-top:12px; color:var(--ink-dim); font-size:13px">※ 手持ちの現金以上は買えません。</p>`,
+  },
+  {
+    title: '💰 資産と損益の確認',
+    body: `<ul class="tut-list">
+  <li>ページ上部の<strong>「資産合計」</strong>でリアルタイム確認</li>
+  <li><strong>「保有銘柄」テーブル</strong>で各株の含み損益を確認</li>
+  <li><span style="color:var(--green)">緑 = 含み益（プラス）</span> / <span style="color:var(--red)">赤 = 含み損（マイナス）</span></li>
+  <li>グラフ（スパークライン）で値動きの波形を確認できる</li>
+</ul>`,
+  },
+  {
+    title: '📤 株の売り方 & 日記',
+    body: `<ol class="tut-list">
+  <li>保有している銘柄のカードをタップ</li>
+  <li>モーダルで <strong>「売る」タブ</strong> に切り替え</li>
+  <li>売りたい株数を入力して「なぜ売る？」を記録</li>
+  <li>「売る」ボタンで売却完了</li>
+</ol>
+<p style="margin-top:12px">売買の記録は<strong>「トレード日記」</strong>に残ります。振り返ることで自分の投資スタイルが見えてきます。</p>`,
+  },
+];
+
+let tutStep = 0;
+
+window.openTutorial = function(step = 0) {
+  tutStep = step;
+  renderTutorial();
+  document.getElementById('tutorialModal').classList.add('show');
+};
+
+window.closeTutorial = function() {
+  document.getElementById('tutorialModal').classList.remove('show');
+};
+
+window.tutorialStep = function(delta) {
+  tutStep = Math.max(0, Math.min(TUTORIAL_STEPS.length - 1, tutStep + delta));
+  renderTutorial();
+};
+
+function renderTutorial() {
+  const step = TUTORIAL_STEPS[tutStep];
+  document.getElementById('tutContent').innerHTML = `
+    <h2 class="tut-title">${step.title}</h2>
+    <div class="tut-body">${step.body}</div>
+  `;
+  document.getElementById('tutPrev').disabled = tutStep === 0;
+  document.getElementById('tutNext').textContent = tutStep === TUTORIAL_STEPS.length - 1 ? '✓ 閉じる' : '次へ →';
+  const dots = document.getElementById('tutDots');
+  dots.innerHTML = TUTORIAL_STEPS.map((_, i) =>
+    `<span class="tut-dot${i === tutStep ? ' active' : ''}"></span>`
+  ).join('');
+  if (tutStep === TUTORIAL_STEPS.length - 1) {
+    document.getElementById('tutNext').onclick = closeTutorial;
+  } else {
+    document.getElementById('tutNext').onclick = () => tutorialStep(1);
+  }
+}
+
 // ============ ブート ============
 if (state.onboardingSeen) {
   document.getElementById('onboarding').style.display = 'none';
 }
+skipToNextMarketOpen();
 initPrices();
 render();
 startSimLoop();
 
 document.getElementById('modal').addEventListener('click', (e) => {
   if (e.target.id === 'modal') closeModal();
+});
+document.getElementById('tutorialModal').addEventListener('click', (e) => {
+  if (e.target.id === 'tutorialModal') closeTutorial();
 });
