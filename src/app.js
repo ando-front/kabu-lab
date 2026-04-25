@@ -1,5 +1,6 @@
 import { STOCKS } from './stocks.js';
 import { tickPrice, isMarketOpen, formatSimTime, advanceTime, checkNewsEvent, NEWS_EVENTS, defaultMacro, evolveMacro, describeMacro } from './simulator.js';
+import { SCENARIOS, getScenario } from './scenarios.js';
 
 // ============ 状態 ============
 const STORAGE_KEY = 'kabu_state_v2';
@@ -42,6 +43,8 @@ function defaultState() {
     accounts: null,                    // { aggressive: {...}, defensive: {...} } (有効化時に生成)
     // Phase 3: マクロ経済
     macro: defaultMacro(),
+    // Phase A: シナリオモード
+    scenarioMode: null,         // null | { id, startMinute, firedScriptIdx, finished, savedFreeplay }
   };
 }
 
@@ -120,6 +123,232 @@ window.switchAccount = function(id) {
   render();
 };
 
+// ============ Phase A: シナリオモード ============
+// 起動するとフリープレイ状態を退避し、新規100万円で固定スクリプトを進める。
+// 期間が終わるか、ユーザが中断すると元に戻る。
+const SCENARIO_FIELDS = [
+  'cash','initialCapital','holdings','journal','portfolioHistory','totalCommission','totalTax',
+  'simMinute','prices','prevClose','newsLog','firedNewsIds','lastReviewDay',
+  'multiMode','activeAccount','accounts','macro','onboardingSeen',
+];
+
+function snapshotState() {
+  const out = {};
+  for (const k of SCENARIO_FIELDS) out[k] = JSON.parse(JSON.stringify(state[k] ?? null));
+  return out;
+}
+
+function restoreSnapshot(snap) {
+  for (const k of SCENARIO_FIELDS) state[k] = snap[k];
+}
+
+window.openScenarioPicker = function() {
+  const cards = SCENARIOS.map(sc => {
+    const goals = sc.learningGoals.map(g => `<span class="sc-goal">${g}</span>`).join('');
+    return `<div class="scenario-card" onclick="startScenario('${sc.id}')">
+      <div class="sc-badge">${sc.badge}</div>
+      <div class="sc-body">
+        <div class="sc-name">${sc.name}</div>
+        <div class="sc-summary">${escapeHtml(sc.summary)}</div>
+        <div class="sc-meta">
+          <span class="sc-days">${sc.durationDays}日間</span>
+          <div class="sc-goals">${goals}</div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+  document.getElementById('scenarioContent').innerHTML = `
+    <h2 class="tut-title">📚 学習シナリオを選ぶ</h2>
+    <p style="color:var(--ink-dim);font-size:13px;margin-bottom:14px">
+      過去の市場で起きた出来事を再現したシナリオで学べます。<br>
+      新しい100万円で開始され、${state.scenarioMode ? '<strong>進行中のシナリオは破棄されます</strong>' : 'フリープレイの状態は退避されます(終了時に復元)'}。
+    </p>
+    <div class="scenario-list">${cards}</div>
+    <button class="tut-btn" style="margin-top:14px" onclick="closeScenarioPicker()">キャンセル</button>
+  `;
+  document.getElementById('scenarioModal').classList.add('show');
+};
+
+window.closeScenarioPicker = function() {
+  document.getElementById('scenarioModal').classList.remove('show');
+};
+
+window.startScenario = function(id) {
+  const sc = getScenario(id);
+  if (!sc) return;
+  // 既存シナリオ進行中なら確認
+  if (state.scenarioMode && !state.scenarioMode.finished) {
+    if (!confirm('進行中のシナリオは破棄されます。よろしいですか?')) return;
+  }
+  // フリープレイ退避(初回起動時のみ。シナリオ→シナリオ切替時は前回の退避を維持)
+  const savedFreeplay = (state.scenarioMode && state.scenarioMode.savedFreeplay)
+    ? state.scenarioMode.savedFreeplay
+    : snapshotState();
+
+  // シナリオ初期化
+  state.cash = 1000000;
+  state.initialCapital = 1000000;
+  state.holdings = {};
+  state.journal = [];
+  state.portfolioHistory = [];
+  state.totalCommission = 0;
+  state.totalTax = 0;
+  state.simMinute = 9 * 60;     // Day 1 09:00
+  state.prices = {};
+  state.prevClose = {};
+  state.newsLog = [];
+  state.firedNewsIds = [];
+  state.lastReviewDay = 0;
+  state.multiMode = false;
+  state.activeAccount = 'main';
+  state.accounts = null;
+  state.macro = { ...defaultMacro(), ...sc.initialMacro };
+
+  STOCKS.forEach(stk => {
+    state.prices[stk.ticker] = stk.basePrice;
+    state.prevClose[stk.ticker] = stk.basePrice;
+  });
+  priceHistory = {};
+  candleHistory = {};
+  candleBuffer = {};
+  lastPrices = {};
+
+  state.scenarioMode = {
+    id: sc.id,
+    startMinute: state.simMinute,
+    firedScriptIdx: [],
+    finished: false,
+    savedFreeplay,
+  };
+  saveState();
+  closeScenarioPicker();
+  showToast(`📚 シナリオ「${sc.name}」を開始しました`);
+  render();
+};
+
+function exitScenario(restoreFreeplay = true) {
+  if (!state.scenarioMode) return;
+  const snap = state.scenarioMode.savedFreeplay;
+  state.scenarioMode = null;
+  if (restoreFreeplay && snap) {
+    restoreSnapshot(snap);
+  }
+  // ヒストリ系はメモリのみなので作り直し
+  priceHistory = {};
+  candleHistory = {};
+  candleBuffer = {};
+  lastPrices = {};
+  STOCKS.forEach(stk => {
+    if (state.prices[stk.ticker] != null) {
+      priceHistory[stk.ticker] = [{ t: state.simMinute, price: state.prices[stk.ticker] }];
+      lastPrices[stk.ticker] = state.prices[stk.ticker];
+    }
+  });
+  saveState();
+  render();
+}
+
+window.exitScenario = exitScenario;
+
+// シナリオ進行: 1tickごとに、現在の経過日数 >= script[i].day かつまだ発火していなければ発火
+function progressScenario() {
+  if (!state.scenarioMode || state.scenarioMode.finished) return;
+  const sc = getScenario(state.scenarioMode.id);
+  if (!sc) return;
+  const elapsedDays = Math.floor((state.simMinute - state.scenarioMode.startMinute) / (24 * 60));
+
+  sc.script.forEach((evt, idx) => {
+    if (state.scenarioMode.firedScriptIdx.includes(idx)) return;
+    if (elapsedDays < evt.day) return;
+    // 市場オープン時のみ発火(終了イベントは例外)
+    if (!isMarketOpen(state.simMinute) && idx < sc.script.length - 1) return;
+    state.scenarioMode.firedScriptIdx.push(idx);
+    applyScenarioEvent(evt, sc);
+  });
+
+  // 期間終了判定
+  if (elapsedDays >= sc.durationDays && !state.scenarioMode.finished) {
+    state.scenarioMode.finished = true;
+    showScenarioResult(sc);
+  }
+}
+
+function applyScenarioEvent(evt, sc) {
+  // マクロ更新
+  if (evt.macroDelta) {
+    if (!state.macro) state.macro = defaultMacro();
+    for (const k of ['rate','fx','cycle']) {
+      if (evt.macroDelta[k] != null) {
+        state.macro[k] = Math.max(-1, Math.min(1, state.macro[k] + evt.macroDelta[k]));
+      }
+    }
+  }
+  // 株価への効果
+  const affected = [];
+  if (evt.effect && evt.effect !== 0) {
+    STOCKS.forEach(stk => {
+      const matchTicker = evt.ticker && evt.ticker === stk.ticker;
+      const matchTag = evt.tag && evt.tag === stk.tag;
+      const isGlobal = !evt.ticker && !evt.tag;
+      if (matchTicker || matchTag || isGlobal) {
+        const before = state.prices[stk.ticker];
+        let np = before * (1 + evt.effect);
+        np = Math.max(before * 0.95, Math.min(before * 1.05, np));
+        np = np < 100 ? Math.round(np * 10) / 10 : Math.round(np);
+        state.prices[stk.ticker] = np;
+        if (priceHistory[stk.ticker]) {
+          priceHistory[stk.ticker].push({ t: state.simMinute, price: np });
+          if (priceHistory[stk.ticker].length > 150) priceHistory[stk.ticker].shift();
+        }
+        affected.push(stk.name);
+      }
+    });
+  }
+  const entry = { ...evt, simMinute: state.simMinute, affected, scenario: sc.id };
+  state.newsLog.push(entry);
+  activeNewsEvent = entry;
+  showNewsToast(entry);
+}
+
+function showScenarioResult(sc) {
+  const total = state.cash + getTotalStockValue();
+  const delta = total - state.initialCapital;
+  const pct = (delta / state.initialCapital) * 100;
+  // 完走記録
+  if (!state.completedScenarios) state.completedScenarios = [];
+  state.completedScenarios.push({ id: sc.id, delta, pct, completedAt: Date.now() });
+  saveState();
+  const sign = delta >= 0 ? '+' : '';
+  const cls = delta > 0 ? 'positive' : delta < 0 ? 'negative' : 'zero';
+  const points = sc.debrief.points.map(p => `<li>${escapeHtml(p)}</li>`).join('');
+  // タグ別/銘柄別ベスト
+  const tagStats = buildDecisionTagStats(state);
+  document.getElementById('scenarioResultContent').innerHTML = `
+    <h2 class="tut-title">${sc.badge} シナリオ完了 — ${sc.name}</h2>
+    <div class="review-perf">
+      <div class="review-perf-label">最終損益</div>
+      <div class="review-perf-value ${cls}">${sign}${formatYen(delta)} (${sign}${pct.toFixed(2)}%)</div>
+    </div>
+    <div class="review-section-title">${sc.debrief.title}</div>
+    <ul class="scenario-debrief">${points}</ul>
+    ${tagStats}
+    <div class="review-question">
+      <strong>🤔 振り返ろう</strong><br>
+      もう一度同じシナリオをやり直すなら、最初に何を変える?
+    </div>
+    <div style="display:flex;gap:10px;margin-top:18px">
+      <button class="tut-btn" style="flex:1" onclick="exitScenario(true);closeScenarioResult()">フリープレイに戻る</button>
+      <button class="tut-btn tut-btn-next" style="flex:1" onclick="closeScenarioResult();openScenarioPicker()">別のシナリオへ</button>
+    </div>
+  `;
+  document.getElementById('scenarioResultModal').classList.add('show');
+  checkMissionUnlocks();
+}
+
+window.closeScenarioResult = function() {
+  document.getElementById('scenarioResultModal').classList.remove('show');
+};
+
 window.toggleMultiMode = function() {
   if (!state.multiMode) {
     // 単一→複数: 既存口座を「メイン」のまま残し、新しく2口座(各50万円)を作成
@@ -190,12 +419,16 @@ function simTick() {
     });
   }
 
-  // ニュースイベント判定
+  // ニュースイベント判定(シナリオモード中はランダムニュース抑制)
   if (!state.firedNewsIds) state.firedNewsIds = [];
   if (!state.newsLog) state.newsLog = [];
-  const newsEvt = checkNewsEvent(state.simMinute, state.firedNewsIds);
-  if (newsEvt) {
-    applyNewsEvent(newsEvt);
+  if (!state.scenarioMode) {
+    const newsEvt = checkNewsEvent(state.simMinute, state.firedNewsIds);
+    if (newsEvt) {
+      applyNewsEvent(newsEvt);
+    }
+  } else {
+    progressScenario();
   }
 
   const nextMinute = advanceTime(state.simMinute);
@@ -814,6 +1047,7 @@ function getTotalStockValue() {
 
 function render() {
   document.getElementById('simClock').textContent = formatSimTime(state.simMinute);
+  renderScenarioBanner();
   renderPortfolio();
   renderHoldings();
   renderStocks();
@@ -825,6 +1059,34 @@ function render() {
     updateSummary();
   }
 }
+
+function renderScenarioBanner() {
+  const el = document.getElementById('scenarioBanner');
+  if (!el) return;
+  if (!state.scenarioMode) { el.innerHTML = ''; el.style.display = 'none'; return; }
+  const sc = getScenario(state.scenarioMode.id);
+  if (!sc) { el.innerHTML = ''; el.style.display = 'none'; return; }
+  const elapsedDays = Math.max(0, Math.floor((state.simMinute - state.scenarioMode.startMinute) / (24 * 60)));
+  const remaining = Math.max(0, sc.durationDays - elapsedDays);
+  const progress = Math.min(100, (elapsedDays / sc.durationDays) * 100);
+  el.style.display = '';
+  el.innerHTML = `
+    <div class="sc-banner-inner">
+      <div class="sc-banner-badge">${sc.badge}</div>
+      <div class="sc-banner-body">
+        <div class="sc-banner-title">📚 シナリオ進行中: ${sc.name}</div>
+        <div class="sc-banner-meta">経過 ${elapsedDays}日 / 残り ${remaining}日</div>
+        <div class="sc-banner-bar"><div class="sc-banner-fill" style="width:${progress.toFixed(1)}%"></div></div>
+      </div>
+      <button class="sc-banner-quit" onclick="confirmExitScenario()">中断</button>
+    </div>
+  `;
+}
+
+window.confirmExitScenario = function() {
+  if (!confirm('シナリオを中断してフリープレイに戻りますか?\n進行中のシナリオデータは破棄されます。')) return;
+  exitScenario(true);
+};
 
 // ============ 予想 vs 実際カード(L1強化) ============
 // 買いトレードの予想株価が予定時刻(7日後)を過ぎたら、振り返りカードを表示。
@@ -1769,6 +2031,17 @@ const TUTORIAL_STEPS = [
 <p style="margin-top:8px;color:var(--ink-dim);font-size:12px">プロの投資家も同じことをしています(=投資日誌)。これが続けられるとレベルが一段上がります。</p>`,
   },
   {
+    title: '📚 学習シナリオで歴史的局面を体験',
+    body: `<p>右上の「<strong>📚 シナリオ</strong>」ボタンから、過去に実際に起きた市場の局面を再現したシナリオに挑戦できます。</p>
+<table class="tut-table">
+  <tr><td>🏦</td><td><strong>2008 リーマン・ショック風</strong> — 金融危機。銀行株急落、ディフェンシブが効く局面</td></tr>
+  <tr><td>🦠</td><td><strong>2020 コロナ・ショック風</strong> — 急落から急回復。業種ごとに勝ち負けが分かれる</td></tr>
+  <tr><td>📈</td><td><strong>インフレ・利上げ局面</strong> — 銀行追い風、輸入企業逆風、円安</td></tr>
+</table>
+<p style="margin-top:10px">シナリオは新規100万円・21日間で進行します(フリープレイは退避され、終了時に戻ります)。完了すると「振り返り」が表示され、何を学べたかを確認できます。</p>
+<p style="margin-top:8px;color:var(--ink-dim);font-size:12px">同じ局面を何度もやり直せるので、戦略を変えて結果を比較してみよう。</p>`,
+  },
+  {
     title: '🏆 ミッションに挑戦しよう',
     body: `<p>右上の<strong>「🏆 ミッション」</strong>ボタンで達成目標の一覧が見られます。</p>
 <p>チュートリアルで学んだことを実際に試して、ミッションを達成しよう！</p>
@@ -1952,6 +2225,10 @@ const MISSIONS = [
   { id: 'm14', title: '予想を立ててみた',   desc: '買うときに「1週間後の予想株価」を入力しよう', check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'buy' && e.predictPrice != null)) },
   { id: 'm15', title: '答え合わせ',         desc: '予想と実際の答え合わせカードを確認しよう', check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'buy' && e.predictAcknowledged)) },
   { id: 'm16', title: '判断タグを使った',   desc: '買うときに「直感/ニュース/チャート/分散」のタグを選ぼう', check: (s) => eachAccount(s, a => a.journal.some(e => e.action === 'buy' && e.decisionTag)) },
+  // Phase A: シナリオモード
+  { id: 'm17', title: 'シナリオに挑戦',     desc: '学習シナリオを1つ完走しよう', check: (s) => (s.completedScenarios || []).length >= 1 },
+  { id: 'm18', title: 'シナリオで利益',     desc: 'シナリオを利益+で完走しよう', check: (s) => (s.completedScenarios || []).some(r => r.delta > 0) },
+  { id: 'm19', title: '3シナリオ制覇',     desc: '3つのシナリオすべてを完走しよう', check: (s) => new Set((s.completedScenarios || []).map(r => r.id)).size >= 3 },
 ];
 
 function getMissionStatus() {
@@ -2051,4 +2328,10 @@ document.getElementById('missionModal').addEventListener('click', (e) => {
 });
 document.getElementById('parentReportModal').addEventListener('click', (e) => {
   if (e.target.id === 'parentReportModal') closeParentReport();
+});
+document.getElementById('scenarioModal').addEventListener('click', (e) => {
+  if (e.target.id === 'scenarioModal') closeScenarioPicker();
+});
+document.getElementById('scenarioResultModal').addEventListener('click', (e) => {
+  if (e.target.id === 'scenarioResultModal') closeScenarioResult();
 });

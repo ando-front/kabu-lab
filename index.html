@@ -14,6 +14,7 @@
   <header>
     <div class="logo">KABU_LAB</div>
     <div class="clock">
+      <button class="tut-open-btn" onclick="openScenarioPicker()">📚 シナリオ</button>
       <button class="tut-open-btn" onclick="openMissions()">🏆 ミッション</button>
       <button class="tut-open-btn" onclick="openTutorial()">？ 使い方</button>
       <span class="mode-badge">SIM</span>
@@ -26,6 +27,8 @@
       </div>
     </div>
   </header>
+
+  <div id="scenarioBanner" class="scenario-banner"></div>
 
   <div id="onboarding" class="onboarding">
     <button class="onboarding-close" onclick="dismissOnboarding()">×</button>
@@ -145,6 +148,20 @@
 </div>
 
 <div id="newsToast" class="news-toast"></div>
+
+<div class="modal-backdrop" id="scenarioModal">
+  <div class="modal scenario-modal">
+    <button class="modal-close" onclick="closeScenarioPicker()">×</button>
+    <div id="scenarioContent"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="scenarioResultModal">
+  <div class="modal scenario-result-modal">
+    <button class="modal-close" onclick="closeScenarioResult()">×</button>
+    <div id="scenarioResultContent"></div>
+  </div>
+</div>
 
 <div class="modal-backdrop" id="tutorialModal">
   <div class="modal tutorial-modal">
