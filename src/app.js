@@ -1,6 +1,7 @@
 import { STOCKS } from './stocks.js';
 import { tickPrice, isMarketOpen, formatSimTime, advanceTime, checkNewsEvent, NEWS_EVENTS, defaultMacro, evolveMacro, describeMacro } from './simulator.js';
 import { SCENARIOS, getScenario } from './scenarios.js';
+import { compareToHistorical } from './historical.js';
 
 // ============ 状態 ============
 const STORAGE_KEY = 'kabu_state_v2';
@@ -310,6 +311,50 @@ function applyScenarioEvent(evt, sc) {
   showNewsToast(entry);
 }
 
+// 実データ参照セクション(Phase 3 / L4): シナリオ完了時に対応する歴史と比較
+function buildHistoricalSection(scenarioId, userPct) {
+  const cmp = compareToHistorical(scenarioId, userPct);
+  if (!cmp) return '';
+  const { ref, idx, verdict } = cmp;
+  const userSign = userPct >= 0 ? '+' : '';
+  const idxSign = idx >= 0 ? '+' : '';
+  const userCls = userPct > 0 ? 'positive' : userPct < 0 ? 'negative' : 'zero';
+  const idxCls = idx > 0 ? 'positive' : idx < 0 ? 'negative' : 'zero';
+  const events = ref.events.map(e => `
+    <li class="historical-event">
+      <span class="historical-event-date">${escapeHtml(e.date)}</span>
+      <span class="historical-event-headline">${escapeHtml(e.headline)}</span>
+      <span class="historical-event-why">${escapeHtml(e.why)}</span>
+    </li>
+  `).join('');
+  return `
+    <div class="historical-section">
+      <div class="review-section-title">📚 実際の歴史と比べる</div>
+      <div class="historical-period">${escapeHtml(ref.period)}</div>
+      <div class="historical-compare">
+        <div class="historical-compare-cell">
+          <div class="historical-compare-label">あなたの結果</div>
+          <div class="historical-compare-value ${userCls}">${userSign}${userPct.toFixed(2)}%</div>
+        </div>
+        <div class="historical-compare-cell">
+          <div class="historical-compare-label">${escapeHtml(ref.indexLabel)} (概算)</div>
+          <div class="historical-compare-value ${idxCls}">${idxSign}${idx}%</div>
+          <div class="historical-compare-sub">${escapeHtml(ref.indexStartLabel)} → ${escapeHtml(ref.indexEndLabel)}</div>
+        </div>
+      </div>
+      <div class="historical-verdict">${escapeHtml(verdict)}</div>
+      <div class="historical-summary">${escapeHtml(ref.summary)}</div>
+      <details class="historical-events-wrap">
+        <summary>当時の主な出来事を見る (${ref.events.length}件)</summary>
+        <ul class="historical-events">${events}</ul>
+        <div class="historical-aftermath">その後: ${escapeHtml(ref.aftermathLabel)}</div>
+      </details>
+      <div class="historical-disclaimer">※ 指数の数値は公開された日経平均株価終値に基づく概算。シミュレーションの値動きは現実と完全には一致しない。</div>
+      <div class="historical-insight">💡 ${escapeHtml(ref.insight)}</div>
+    </div>
+  `;
+}
+
 function showScenarioResult(sc) {
   const total = state.cash + getTotalStockValue();
   const delta = total - state.initialCapital;
@@ -323,6 +368,8 @@ function showScenarioResult(sc) {
   const points = sc.debrief.points.map(p => `<li>${escapeHtml(p)}</li>`).join('');
   // タグ別/銘柄別ベスト
   const tagStats = buildDecisionTagStats(state);
+  // 実データ参照(Phase 3 / L4): シナリオに対応する実史と指数の比較
+  const histSection = buildHistoricalSection(sc.id, pct);
   document.getElementById('scenarioResultContent').innerHTML = `
     <h2 class="tut-title">${sc.badge} シナリオ完了 — ${sc.name}</h2>
     <div class="review-perf">
@@ -332,6 +379,7 @@ function showScenarioResult(sc) {
     <div class="review-section-title">${sc.debrief.title}</div>
     <ul class="scenario-debrief">${points}</ul>
     ${tagStats}
+    ${histSection}
     <div class="review-question">
       <strong>🤔 振り返ろう</strong><br>
       もう一度同じシナリオをやり直すなら、最初に何を変える?
