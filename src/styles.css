@@ -827,3 +827,87 @@ header {
 .tag-stats-table td.positive { color: var(--green); }
 .tag-stats-table td.negative { color: var(--red); }
 .tag-stats-table td.zero { color: var(--ink-dim); }
+
+/* 実データ参照(Phase 3 / L4): シナリオ完了時の実史比較セクション */
+.historical-section {
+  margin-top: 20px; padding: 14px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+}
+.historical-period {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--ink-dim); letter-spacing: 1px; margin-bottom: 12px;
+}
+.historical-compare {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;
+}
+.historical-compare-cell {
+  padding: 10px; background: var(--bg-soft); border-radius: 3px; text-align: center;
+}
+.historical-compare-label {
+  font-size: 10px; color: var(--ink-dim); letter-spacing: 1px; margin-bottom: 4px;
+}
+.historical-compare-value {
+  font-family: 'JetBrains Mono', monospace; font-size: 22px; font-weight: 700;
+}
+.historical-compare-value.positive { color: var(--green); }
+.historical-compare-value.negative { color: var(--red); }
+.historical-compare-value.zero { color: var(--ink-dim); }
+.historical-compare-sub {
+  font-size: 10px; color: var(--ink-dim); margin-top: 4px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.historical-verdict {
+  padding: 8px 10px; margin-bottom: 10px;
+  background: var(--bg-soft); border-left: 3px solid var(--green);
+  font-size: 12px; line-height: 1.6; color: var(--ink);
+}
+.historical-summary {
+  font-size: 12px; line-height: 1.7; color: var(--ink-dim); margin-bottom: 10px;
+}
+.historical-events-wrap {
+  margin-bottom: 10px;
+}
+.historical-events-wrap > summary {
+  cursor: pointer; font-size: 12px; color: var(--accent);
+  padding: 6px 0; user-select: none;
+}
+.historical-events-wrap > summary::marker { color: var(--ink-dim); }
+.historical-events {
+  list-style: none; padding: 6px 0 0; margin: 0;
+}
+.historical-event {
+  display: grid; grid-template-columns: 100px 1fr; column-gap: 10px;
+  padding: 8px 0; border-bottom: 1px dashed var(--border);
+}
+.historical-event:last-child { border-bottom: none; }
+.historical-event-date {
+  font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  color: var(--ink-dim); letter-spacing: 0.5px;
+}
+.historical-event-headline {
+  font-size: 12px; font-weight: 700; color: var(--ink); line-height: 1.5;
+}
+.historical-event-why {
+  grid-column: 2; font-size: 11px; color: var(--ink-dim);
+  line-height: 1.6; margin-top: 3px;
+}
+.historical-aftermath {
+  margin-top: 8px; padding: 6px 8px;
+  font-size: 11px; color: var(--ink-dim);
+  background: var(--bg-soft); border-radius: 2px;
+}
+.historical-disclaimer {
+  font-size: 10px; color: var(--ink-dim);
+  line-height: 1.5; margin-bottom: 8px;
+}
+.historical-insight {
+  padding: 8px 10px; background: var(--bg-soft);
+  border-left: 3px solid var(--yellow);
+  font-size: 12px; line-height: 1.6; color: var(--ink);
+}
+
+@media (max-width: 600px) {
+  .historical-compare { grid-template-columns: 1fr; }
+  .historical-event { grid-template-columns: 1fr; }
+  .historical-event-why { grid-column: 1; }
+}
